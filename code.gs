@@ -334,6 +334,31 @@ function doGet() {
     .addMetaTag('viewport', 'width=device-width, initial-scale=1, viewport-fit=cover');
 }
 
+/**
+ * API para el frontend alojado fuera de Apps Script (p. ej. Vercel).
+ * Recibe POST {fn, args} y responde JSON {ok, data} o {ok:false, error}.
+ * Solo expone funciones públicas y de administración; nunca las de mantenimiento.
+ * Las funciones admin siguen validando el token de sesión internamente.
+ */
+const API_PERMITIDAS_ = /^(getPublicData|quoteReservation|createReservation|lookupReservation|adminLogin|adminLogout|staffAgenda|admin[A-Z]\w*)$/;
+
+function doPost(e) {
+  let res;
+  try {
+    const body = JSON.parse((e && e.postData && e.postData.contents) || '{}');
+    const fn = String(body.fn || '');
+    const args = Array.isArray(body.args) ? body.args : [];
+    if (!API_PERMITIDAS_.test(fn) || typeof globalThis[fn] !== 'function') {
+      throw new Error('Operación no permitida.');
+    }
+    res = { ok: true, data: globalThis[fn].apply(null, args) };
+  } catch (err) {
+    res = { ok: false, error: String((err && err.message) || err || 'Ocurrió un error.') };
+  }
+  return ContentService.createTextOutput(JSON.stringify(res === undefined ? null : res))
+    .setMimeType(ContentService.MimeType.JSON);
+}
+
 /** Menú en la hoja (solo si el script está vinculado a un Sheet). */
 function onOpen() {
   try {
