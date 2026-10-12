@@ -2958,10 +2958,13 @@ function openStaffPw() {
 let refreshTimer;
 async function refreshPublicNow() {
   try {
-    S.data = await call('getPublicData');
-    PR.init(S.data.config);
-    indexOcc(S.data.ocupacion);
-  } catch (e) { /* se reintenta en la próxima carga */ }
+    const d = await call('getPublicData');
+      if (d && d.config) {
+        S.data = d;
+        PR.init(d.config);
+        indexOcc(d.ocupacion);
+      }
+    } catch (e) { /* se reintenta en la próxima carga */ }
 }
 function refreshPublicSoon() {
   clearTimeout(refreshTimer);
