@@ -710,7 +710,7 @@ const S = {
   pending: null,
   lastRes: null,
   onConfirm: null,
-  ad: { token: null, user: null, panel: null, tab: 'resumen', d: null, fin: null, finCab: '', finFiltro: { q: '', desde: '', hasta: '', categoria: '', estado: 'Activo' }, f: { q: '', estado: '', cab: '' }, days: 21, lastField: {}, tarCab: '' },
+  ad: { token: null, user: null, panel: null, tab: 'resumen', d: null, fin: null, finCab: '', finFiltro: { q: '', mes: '', concepto: '', tipo: '', desde: '', hasta: '', categoria: '', estado: 'Activo' }, f: { q: '', estado: '', cab: '' }, days: 21, lastField: {}, tarCab: '' },
   st: null,
   stRange: '7'
 };
@@ -1903,7 +1903,7 @@ async function loadFinance() {
   }
 }
 
-function aFinanzas() {
+function financeOverview() {
   const f = S.ad.fin;
   if (!f) return loadingView('Cargando resumen financiero…');
   const seleccionada = f.cabanas.find(c => c.ID === S.ad.finCab);
@@ -1917,12 +1917,9 @@ function aFinanzas() {
       ? Math.round(1000 * tot.meses.reduce((a, m) => a + m.noches, 0) /
         tot.meses.reduce((a, m) => a + m.disponibles, 0)) / 10 : 0)
     : tot.ocupacion;
-  return `<div class="a-head"><div><h1>Situación financiera · últimos 6 meses</h1>
+  return `<div class="a-head"><div><h2>Situación financiera · últimos 6 meses</h2>
       <p class="muted">${esc(nombreMes(f.periodo.desde))} a ${esc(nombreMes(f.periodo.hasta))} · mes actual y cinco anteriores.</p></div>
-      <button class="btn btn-primary sm" data-a="newFin">${ic('plus', 18)} Registrar egreso</button></div>
-    <div class="fin-controls">
-      <div class="field"><label>Ver situación de</label><select class="input" id="finCab"><option value="">Todas las cabañas</option>${cabOpts}</select></div>
-    </div>
+      </div>
     <div class="fin-cards">
       <div class="stat"><span>Ingresos de reservas · 6 meses</span><b>${money(tot.ingresos)}</b></div>
       <div class="stat"><span>Egresos registrados · 6 meses</span><b>${money(tot.egresos)}</b></div>
@@ -1943,45 +1940,140 @@ function aFinanzas() {
     ${seleccionada ? '' : `<section class="a-card mt16"><h2>Acumulado por cabaña · 6 meses</h2><div class="fin-table-wrap"><table class="table fin-table"><thead><tr><th>Cabaña</th><th>Ingresos</th><th>Egresos</th><th>Resultado</th></tr></thead><tbody>
       ${f.cabanas.map(c => `<tr><td>${esc(c.Nombre)}</td><td>${money(c.ingresos)}</td><td>${money(c.egresos)}</td><td class="${c.saldo < 0 ? 'fin-negative' : ''}">${money(c.saldo)}</td></tr>`).join('')}
     </tbody></table></div></section>`}
-    ${financeDetail()}
     <p class="muted small mt16">Ingresos: total de reservas no canceladas, asignado al mes de llegada, incluidas las pendientes. No equivale a cobros recibidos. Egresos: registros manuales activos. Los ingresos manuales antiguos quedan fuera de los totales.</p>`;
 }
 
-function financeDetail() {
-  const z = S.ad.finFiltro;
-  return `<section class="a-card mt16"><h2>Detalle de egresos por concepto</h2>
-    <p class="muted small">Incluye todo el historial. Estos filtros afectan únicamente el listado y sus subtotales; el resumen superior conserva los últimos 6 meses.</p>
-    <div class="filters">
-      <input class="input search" data-live="finSearch" value="${esc(z.q)}" placeholder="Buscar concepto, referencia, cabaña u operador" aria-label="Buscar egresos">
-      <div class="field"><label>Desde</label><input class="input" type="date" data-fin-filter="desde" value="${esc(z.desde)}"></div>
-      <div class="field"><label>Hasta</label><input class="input" type="date" data-fin-filter="hasta" value="${esc(z.hasta)}"></div>
-      <select class="input" data-fin-filter="categoria" aria-label="Categoría"><option value="">Todas las categorías</option>${S.ad.fin.categorias.Egreso.map(c => `<option ${z.categoria === c ? 'selected' : ''}>${esc(c)}</option>`).join('')}</select>
-      <select class="input" data-fin-filter="estado" aria-label="Estado">${['Activo', 'Anulado', 'Todos'].map(s => `<option ${z.estado === s ? 'selected' : ''}>${s}</option>`).join('')}</select>
-      <button class="btn btn-outline sm" data-a="resetFin">Limpiar filtros</button>
-    </div><div id="finResults">${financeResults()}</div></section>`;
+function aFinanzas() {
+  if (!S.ad.fin) return loadingView('Cargando ingresos y egresos…');
+  return `<div class="a-head"><div><h1>Estado de cuenta · ingresos y egresos</h1><p class="muted">Filtrá los movimientos y generá el reporte de esa selección.</p></div><div class="a-actions"><button class="btn btn-outline sm" data-a="printFinance">Imprimir / guardar PDF</button><button class="btn btn-primary sm" data-a="newFin">${ic('plus', 18)} Registrar egreso</button></div></div>
+    ${financeDetail()}
+    <details class="a-card mt16"><summary>Ver panorama histórico y ocupación · últimos 6 meses</summary><p class="hint">Vista complementaria: respeta la cabaña seleccionada; mantiene seis meses completos y no usa los filtros de mes, concepto, tipo ni fechas del estado de cuenta.</p>${financeOverview()}</details>`;
 }
 
-function filteredExpenses() {
+function financeAllRows() {
+  return [...(S.ad.fin.ingresos || []), ...(S.ad.fin.movimientos || [])];
+}
+
+function financeDetail() {
+  const z = S.ad.finFiltro, all = financeAllRows();
+  const conceptos = [...new Set(all.map(r => r.Concepto || 'Sin concepto'))].sort((a,b) => a.localeCompare(b, 'es'));
+  const categorias = [...new Set(['Reservas', ...S.ad.fin.categorias.Egreso])];
+  return `<section class="a-card"><h2>Filtros del estado de cuenta</h2>
+    <div class="filters">
+      <div class="field"><label>Cabaña</label><select class="input" id="finCab"><option value="">Todas las cabañas</option>${S.ad.fin.cabanas.map(c => `<option value="${esc(c.ID)}" ${S.ad.finCab === c.ID ? 'selected' : ''}>${esc(c.Nombre)}</option>`).join('')}</select></div>
+      <div class="field"><label>Mes</label><input class="input" type="month" data-fin-filter="mes" value="${esc(z.mes || '')}"></div>
+      <div class="field"><label>Concepto</label><select class="input" data-fin-filter="concepto"><option value="">Todos los conceptos</option>${conceptos.map(c => `<option value="${esc(c)}" ${z.concepto === c ? 'selected' : ''}>${esc(c)}</option>`).join('')}</select></div>
+      <div class="field"><label>Tipo de movimiento</label><select class="input" data-fin-filter="tipo"><option value="">Ingresos y egresos</option>${['Ingreso','Egreso'].map(t => `<option value="${t}" ${z.tipo === t ? 'selected' : ''}>${t === 'Ingreso' ? 'Solo ingresos' : 'Solo egresos'}</option>`).join('')}</select></div>
+      <div class="field"><label>Buscar</label><input class="input search" data-live="finSearch" value="${esc(z.q)}" placeholder="Concepto, huésped, código, referencia u operador"></div>
+      <div class="field"><label>Desde (opcional)</label><input class="input" type="date" data-fin-filter="desde" value="${esc(z.desde)}"></div>
+      <div class="field"><label>Hasta (opcional)</label><input class="input" type="date" data-fin-filter="hasta" value="${esc(z.hasta)}"></div>
+      <div class="field"><label>Categoría</label><select class="input" data-fin-filter="categoria"><option value="">Todas las categorías</option>${categorias.map(c => `<option ${z.categoria === c ? 'selected' : ''}>${esc(c)}</option>`).join('')}</select></div>
+      <div class="field"><label>Estado</label><select class="input" data-fin-filter="estado">${['Activo', 'Anulado', 'Todos'].map(t => `<option value="${t}" ${z.estado === t ? 'selected' : ''}>${t === 'Anulado' ? 'Anulados / cancelados' : t === 'Activo' ? 'Activos' : t}</option>`).join('')}</select></div>
+      <button class="btn btn-outline sm" data-a="resetFin">Limpiar filtros</button>
+    </div><p class="hint">Sin mes ni fechas: todo el historial, incluidas reservas futuras. Los filtros se combinan entre sí.</p><div id="finResults">${financeResults()}</div></section>`;
+}
+
+function filteredFinanceRows() {
   const z = S.ad.finFiltro, q = normTxt(z.q).trim();
-  return (S.ad.fin.movimientos || []).filter(r =>
+  return financeAllRows().filter(r =>
     (!S.ad.finCab || r.CabanaID === S.ad.finCab) &&
+    (!z.mes || String(r.Fecha).slice(0,7) === z.mes) &&
     (!z.desde || r.Fecha >= z.desde) && (!z.hasta || r.Fecha <= z.hasta) &&
+    (!z.concepto || (r.Concepto || 'Sin concepto') === z.concepto) &&
+    (!z.tipo || r.Tipo === z.tipo) &&
     (!z.categoria || r.Categoria === z.categoria) && (z.estado === 'Todos' || r.Estado === z.estado) &&
-    (!q || normTxt([r.Concepto, r.Categoria, r.Referencia, r.RegistradoPor, r.EditadoPor, r.CabanaNombre, r.ID].join(' ')).includes(q)));
+    (!q || normTxt([r.Concepto, r.Categoria, r.Referencia, r.Cliente, r.Origen, r.RegistradoPor, r.EditadoPor, r.CabanaNombre, r.ID].join(' ')).includes(q)))
+    .sort((a,b) => String(a.Fecha).localeCompare(String(b.Fecha)) || String(a.Creado).localeCompare(String(b.Creado)) || String(a.ID).localeCompare(String(b.ID)));
+}
+
+function filteredExpenses() { return filteredFinanceRows().filter(r => r.Tipo === 'Egreso'); }
+
+function financeStatement() {
+  const rows = filteredFinanceRows();
+  let ingresos = 0, egresos = 0, acumulado = 0;
+  const conceptos = new Map(), meses = new Map();
+  const detail = rows.map(r => {
+    const monto = Number(r.Monto), activo = r.Estado === 'Activo' && Number.isFinite(monto) && monto >= 0;
+    const ingreso = activo && r.Tipo === 'Ingreso' ? monto : 0;
+    const egreso = activo && r.Tipo === 'Egreso' ? monto : 0;
+    ingresos += ingreso; egresos += egreso; acumulado += ingreso - egreso;
+    if (activo) {
+      const key = r.Concepto || 'Sin concepto';
+      const c = conceptos.get(key) || { concepto: key, ingresos: 0, egresos: 0 };
+      c.ingresos += ingreso; c.egresos += egreso; conceptos.set(key,c);
+      const mes = String(r.Fecha).slice(0,7);
+      const m = meses.get(mes) || { mes, ingresos: 0, egresos: 0 };
+      m.ingresos += ingreso; m.egresos += egreso; meses.set(mes,m);
+    }
+    return Object.assign({},r,{ ingreso, egreso, acumulado });
+  });
+  return { rows: detail, ingresos, egresos, saldo: ingresos-egresos,
+    conceptos: [...conceptos.values()].sort((a,b) => a.concepto.localeCompare(b.concepto, 'es')),
+    meses: [...meses.values()].sort((a,b) => a.mes.localeCompare(b.mes)) };
+}
+
+function financeFilterText() {
+  const z = S.ad.finFiltro;
+  const c = S.ad.fin.cabanas.find(c => c.ID === S.ad.finCab);
+  return ['Cabaña: ' + (c ? c.Nombre : 'Todas'), 'Mes: ' + (z.mes || 'Todos'),
+    'Concepto: ' + (z.concepto || 'Todos'), 'Tipo: ' + (z.tipo || 'Ingresos y egresos'),
+    'Desde: ' + (z.desde || 'Sin límite'), 'Hasta: ' + (z.hasta || 'Sin límite'),
+    'Categoría: ' + (z.categoria || 'Todas'), 'Estado: ' + z.estado,
+    'Búsqueda: ' + (z.q || 'Sin texto')].join(' · ');
+}
+
+function financeBasisNote() {
+  return 'Ingresos: importe total de cada reserva imputado a su fecha de llegada, incluidas las pendientes y las externas. No equivale a cobros recibidos. La seña ya forma parte del total y no se suma otra vez. Egresos: gastos registrados por su fecha. Cancelados y anulados se muestran solo como referencia y no suman. El resultado acumulado comienza en cero dentro del filtro: no incluye saldo inicial ni representa saldo bancario. Los ingresos manuales legados no se duplican.';
+}
+
+function financeTable(st, printMode) {
+  return `<div class="fin-table-wrap mt16"><table class="table"><thead><tr><th>Fecha</th><th>Cabaña</th><th>Tipo / estado</th><th>Concepto / detalle</th><th>Referencia</th><th>Ingreso</th><th>Egreso</th><th>Resultado acumulado</th>${printMode ? '' : '<th>Acciones</th>'}</tr></thead><tbody>
+    ${st.rows.map(r => `<tr><td>${esc(r.Fecha)}</td><td>${esc(r.CabanaNombre)}</td><td>${esc(r.Tipo)}<div class="muted small">${esc(r.EstadoReserva || r.Estado)}</div></td><td><b>${esc(r.Concepto)}</b><div class="muted small">${esc(r.Cliente || r.RegistradoPor || '')}${r.Origen ? ' · ' + esc(r.Origen) : ''}</div>${r.Estado !== 'Activo' ? `<div class="small">Importe original: ${esc(money(r.Monto))} · excluido</div>` : ''}</td><td>${esc(r.Referencia || '—')}</td><td class="nw">${esc(money(r.ingreso))}</td><td class="nw">${esc(money(r.egreso))}</td><td class="nw">${esc(money(r.acumulado))}</td>${printMode ? '' : `<td><div class="row-act">${r.Tipo === 'Ingreso' ? `<button class="btn btn-outline sm" data-a="viewFinIncome" data-id="${esc(r.ID)}">Detalle</button>` : `<button class="btn btn-outline sm" data-a="viewFin" data-id="${esc(r.ID)}">Detalle</button>${r.Estado === 'Activo' ? `<button class="btn btn-soft sm" data-a="editFin" data-id="${esc(r.ID)}">Editar</button>` : ''}`}</div></td>`}</tr>`).join('') || `<tr><td colspan="${printMode ? 8 : 9}">No hay movimientos con estos filtros.</td></tr>`}
+    </tbody><tfoot><tr><th colspan="5">Total del filtro</th><th>${esc(money(st.ingresos))}</th><th>${esc(money(st.egresos))}</th><th>${esc(money(st.saldo))}</th>${printMode ? '' : '<th></th>'}</tr></tfoot></table></div>`;
+}
+
+function financeGroups(st) {
+  const table = (title,rows,key) => `<h3 class="mt16">${title}</h3><div class="fin-table-wrap"><table class="table"><thead><tr><th>${key === 'mes' ? 'Mes' : 'Concepto'}</th><th>Ingresos</th><th>Egresos</th><th>Resultado</th></tr></thead><tbody>${rows.map(r=>`<tr><td>${esc(r[key])}</td><td>${esc(money(r.ingresos))}</td><td>${esc(money(r.egresos))}</td><td>${esc(money(r.ingresos-r.egresos))}</td></tr>`).join('') || '<tr><td colspan="4">Sin movimientos activos.</td></tr>'}</tbody></table></div>`;
+  return table('Resumen por mes',st.meses,'mes') + table('Resumen por concepto',st.conceptos,'concepto');
 }
 
 function financeResults() {
-  const rows = filteredExpenses(), grupos = new Map();
-  rows.filter(r => r.Estado === 'Activo').forEach(r => {
-    const key = r.Concepto || 'Sin concepto';
-    grupos.set(key, (grupos.get(key) || 0) + Number(r.Monto));
-  });
-  const total = [...grupos.values()].reduce((a, n) => a + n, 0);
-  return `<p><b>${rows.length} egreso(s)</b> · Total activo filtrado: <b>${money(total)}</b></p>
-    ${grupos.size ? `<details class="mt12"><summary>Ver subtotales por concepto</summary><div class="fin-table-wrap"><table class="table"><thead><tr><th>Concepto</th><th>Total activo</th></tr></thead><tbody>${[...grupos].sort((a, b) => b[1] - a[1]).map(([c, n]) => `<tr><td>${esc(c)}</td><td>${money(n)}</td></tr>`).join('')}</tbody></table></div></details>` : ''}
-    <div class="fin-table-wrap mt16"><table class="table"><thead><tr><th>Fecha</th><th>Concepto / referencia</th><th>Categoría</th><th>Cabaña</th><th>Importe</th><th>Cargado por</th><th>Estado</th><th>Acciones</th></tr></thead><tbody>
-      ${rows.map(r => `<tr><td>${esc(r.Fecha)}</td><td><b>${esc(r.Concepto)}</b><div class="muted small">${esc(r.Referencia || 'Sin referencia')}</div></td><td>${esc(r.Categoria)}</td><td>${esc(r.CabanaNombre)}</td><td class="nw">${money(r.Monto)}</td><td>${esc(r.RegistradoPor)}<div class="muted small">${esc(r.Creado)}</div></td><td>${esc(r.Estado)}</td><td><div class="row-act"><button class="btn btn-outline sm" data-a="viewFin" data-id="${esc(r.ID)}">Detalle</button>${r.Estado === 'Activo' ? `<button class="btn btn-soft sm" data-a="editFin" data-id="${esc(r.ID)}">Editar</button>` : ''}</div></td></tr>`).join('') || '<tr><td colspan="8">No hay egresos con estos filtros.</td></tr>'}
-    </tbody></table></div>`;
+  const st = financeStatement();
+  const z = S.ad.finFiltro;
+  return `${z.desde && z.hasta && z.desde > z.hasta ? '<p class="err">La fecha Desde es posterior a Hasta. Corregí el rango.</p>' : ''}
+    ${!Array.isArray(S.ad.fin.ingresos) ? '<p class="err">El servidor todavía no entrega el detalle de ingresos. Actualizá Code.gs y publicá una nueva versión de la implementación existente.</p>' : ''}
+    <p class="small muted">${esc(financeFilterText())}</p>
+    <div class="fin-cards"><div class="stat"><span>Ingresos del filtro · reservas</span><b>${esc(money(st.ingresos))}</b></div><div class="stat"><span>Egresos del filtro</span><b>${esc(money(st.egresos))}</b></div><div class="stat"><span>Resultado del filtro</span><b class="${st.saldo < 0 ? 'fin-negative' : ''}">${esc(money(st.saldo))}</b></div><div class="stat"><span>Movimientos encontrados</span><b>${st.rows.length}</b></div></div>
+    <p class="hint">${esc(financeBasisNote())}</p>${financeTable(st,false)}
+    <details class="mt16"><summary>Ver resúmenes del filtro por mes y concepto</summary>${financeGroups(st)}</details>`;
+}
+
+function viewFinancialIncome(id) {
+  const r = (S.ad.fin.ingresos || []).find(x => x.ID === id);
+  if (!r) return;
+  const fields = [['Reserva',r.Referencia],['Cliente',r.Cliente],['Cabaña',r.CabanaNombre],['Concepto',r.Concepto],['Llegada',r.Fecha],['Salida',r.CheckOut],['Total',money(r.Monto)],['Seña acordada (incluida en total)',money(r.Sena)],['Estado',r.EstadoReserva],['Origen',r.Origen],['Creada',r.Creado],['Notas',r.Notas]];
+  modal(`${mHead('Detalle del ingreso por reserva')}<p class="hint">Importe de la reserva, no confirmación de cobro. Las modificaciones de la reserva se realizan en Reservas.</p>${fields.map(([k,v]) => `<div class="kv"><span>${k}</span><b>${esc(v || '—')}</b></div>`).join('')}<div class="m-foot"><button class="btn btn-outline" data-a="close">Cerrar</button></div>`);
+}
+
+function financePrintHtml(st) {
+  const negocio = (S.ad.d.config || {}).NEGOCIO_NOMBRE || 'Alpina Hu';
+  const emitido = new Date().toLocaleString('es-PY',{timeZone:'America/Asuncion'});
+  return `<!doctype html><html lang="es"><head><meta charset="utf-8"><title>Estado de cuenta · ${esc(negocio)}</title><style>
+    @page { size: A4 landscape; margin: 12mm; } *{box-sizing:border-box} body{font:11px Arial,sans-serif;color:#17232b;margin:20px} h1{font-size:23px;margin:0 0 5px} h2{font-size:17px} h3{margin-top:22px} p{line-height:1.5} .totals{display:flex;gap:30px;margin:18px 0;padding:12px;background:#edf5f3} .totals b{display:block;font-size:18px;margin-top:4px} table{width:100%;border-collapse:collapse;margin-top:10px;table-layout:fixed} th,td{padding:7px 5px;border-bottom:1px solid #cfd9dc;text-align:left;vertical-align:top;overflow-wrap:anywhere} th{background:#edf2f4} .small,.muted{font-size:10px;color:#53626a} thead{display:table-header-group} tfoot{display:table-row-group} tr{break-inside:avoid} .note{font-size:10px;margin-top:18px} button{padding:10px 18px;margin:12px 0;cursor:pointer} @media print{body{margin:0}button{display:none}}
+    </style></head><body><h1>${esc(negocio)}</h1><h2>Estado de cuenta · ingresos y egresos</h2><p>Emitido: ${esc(emitido)} · ${st.rows.length} movimiento(s)</p><p>${esc(financeFilterText())}</p><div class="totals"><div>Ingresos por reservas<b>${esc(money(st.ingresos))}</b></div><div>Egresos<b>${esc(money(st.egresos))}</b></div><div>Resultado del filtro<b>${esc(money(st.saldo))}</b></div></div><p class="note">${esc(financeBasisNote())}</p>${financeTable(st,true)}${financeGroups(st)}<button id="printReport" type="button">Imprimir / guardar PDF</button></body></html>`;
+}
+
+function printFinance() {
+  if (!Array.isArray(S.ad.fin.ingresos)) { toast('Actualizá el backend para incluir los ingresos antes de imprimir.'); return; }
+  const z = S.ad.finFiltro;
+  if (z.desde && z.hasta && z.desde > z.hasta) { toast('Corregí el rango de fechas antes de imprimir.'); return; }
+  const html = financePrintHtml(financeStatement());
+  const popup = window.open('', '_blank');
+  if (!popup) { toast('Permití ventanas emergentes para abrir el reporte.'); return; }
+  popup.document.open(); popup.document.write(html); popup.document.close();
+  popup.document.getElementById('printReport').onclick = () => { popup.focus(); popup.print(); };
+  // El reporte queda como una copia de los filtros actuales, sin modificar reservas o gastos.
+  setTimeout(() => { if (!popup.closed) { popup.focus(); popup.print(); } }, 300);
 }
 
 function viewFinancialMovement(id) {
@@ -3151,7 +3243,9 @@ const A = {
   newFin() { newFinancialMovement(); },
   editFin(el) { newFinancialMovement(el.dataset.id); },
   viewFin(el) { viewFinancialMovement(el.dataset.id); },
-  resetFin() { S.ad.finFiltro = { q: '', desde: '', hasta: '', categoria: '', estado: 'Activo' }; S.ad.finCab = ''; render(); },
+  viewFinIncome(el) { viewFinancialIncome(el.dataset.id); },
+  printFinance,
+  resetFin() { S.ad.finFiltro = { q: '', mes: '', concepto: '', tipo: '', desde: '', hasta: '', categoria: '', estado: 'Activo' }; S.ad.finCab = ''; render(); },
   voidFin(el) {
     confirmBox('Anular egreso', 'Se conserva el registro y se excluye de los totales. Esta acción no se puede deshacer desde la app.', 'Anular', async () => {
       const f = await adminCall('adminVoidFinancialMovement', el.dataset.id);
