@@ -861,6 +861,22 @@ function adminGetFinance(token) {
         !Number.isFinite(monto) || monto <= 0) return;
     cabanaDe(r.CabanaID).meses[meses.indexOf(mes)].egresos += monto;
   });
+  // Detalle de ingresos: una fila por reserva, sin duplicar seña ni ingresos legados.
+  const ingresos = ctx.reservas.filter(r => isISO_(r.CheckIn) &&
+    Number.isFinite(Number(r.Total)) && Number(r.Total) >= 0).map(r => {
+    const tipo = findTipo_(ctx, r.TipoModo) || {};
+    const nombre = String(r.TipoNombre || tipo.Nombre || r.TipoModo || 'Estadía');
+    return { ID: 'IR-' + String(r.ID), ReservaID: String(r.ID), Tipo: 'Ingreso',
+      Fecha: String(r.CheckIn), CheckOut: String(r.CheckOut || ''),
+      CabanaID: String(r.CabanaID || ''), CabanaNombre: cabanaDe(r.CabanaID).Nombre,
+      Categoria: 'Reservas', Concepto: 'Reserva · ' + nombre,
+      Monto: Number(r.Total), Referencia: String(r.Codigo || ''), Cliente: String(r.Cliente || ''),
+      Origen: String(r.Origen || ''), EstadoReserva: String(r.Estado || '').trim(),
+      Estado: String(r.Estado || '').trim() === 'Cancelada' ? 'Anulado' : 'Activo',
+      Sena: num_(r.Sena, 0), Creado: String(r.Creado || ''), Notas: String(r.Notas || '') };
+  });
+  // Incluye cabañas históricas en el selector, aun sin actividad en los últimos seis meses.
+  movimientos.forEach(r => cabanaDe(r.CabanaID));
   meses.forEach((mes, i) => {
     const occ = ocupacionMes_(ctx, mes);
     const occCab = Object.create(null);
@@ -891,7 +907,7 @@ function adminGetFinance(token) {
   totales.ocupacion = totales.disponibles
     ? Math.round(1000 * totales.noches / totales.disponibles) / 10 : 0;
   return { periodo: { desde: meses[0], hasta: actual }, meses: resumen,
-    cabanas: cabanas, totales: totales, categorias: FIN_CATEGORIAS,
+    cabanas: cabanas, totales: totales, categorias: FIN_CATEGORIAS, ingresos: ingresos,
     movimientos: movimientos.map(r => {
       const out = {};
       SCHEMA.MovimientosFinancieros.forEach(k => { out[k] = r[k] == null ? '' : r[k]; });
