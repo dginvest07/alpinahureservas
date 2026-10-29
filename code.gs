@@ -101,7 +101,7 @@ const SCHEMA = {
   Usuarios: ['Usuario', 'Nombre', 'Rol', 'Activo', 'UltimoAcceso'],
   Configuracion: ['Clave', 'Valor', 'Descripcion'],
   MovimientosFinancieros: ['ID', 'Fecha', 'CabanaID', 'Tipo', 'Categoria', 'Concepto', 'Monto',
-    'Referencia', 'RegistradoPor', 'Creado', 'Estado', 'AnuladoPor', 'AnuladoEn']
+    'Referencia', 'RegistradoPor', 'Creado', 'Estado', 'AnuladoPor', 'AnuladoEn', 'EditadoPor', 'EditadoEn', 'Revision', 'HistorialCambios']
 };
 
 const HOJAS = ['Reservas', 'Cabanas', 'Tarifas', 'TiposReserva', 'Promociones', 'Resenas', 'Usuarios', 'Configuracion', 'MovimientosFinancieros'];
@@ -129,13 +129,13 @@ const PERMISOS = {
   RECORDATORIOS: { nombre: 'Recordatorios', descripcion: 'Configurar y enviar recordatorios.' },
   USUARIOS: { nombre: 'Usuarios', descripcion: 'Crear, editar o desactivar usuarios.' },
   REPORTES: { nombre: 'Resumen', descripcion: 'Ver indicadores y reportes del negocio.' },
-  FINANZAS: { nombre: 'Finanzas', descripcion: 'Ver, registrar y anular movimientos financieros.' },
+  FINANZAS: { nombre: 'Finanzas', descripcion: 'Ver, registrar, editar y anular egresos con detalle por concepto.' },
   LIMPIEZA: { nombre: 'Agenda de limpieza', descripcion: 'Ver entradas, salidas y recambios sin datos sensibles.' }
 };
 
 const ROLES = {
   DUENO: { nombre: 'Dueño', descripcion: 'Acceso total a la app y a la configuración de permisos.' },
-  OPERADOR: { nombre: 'Operador', descripcion: 'Gestiona reservas; por defecto no puede cambiar precios.' },
+  OPERADOR: { nombre: 'Operador', descripcion: 'Gestiona reservas y precios acordados de reservas externas; por defecto no puede modificar las tarifas publicadas.' },
   LIMPIEZA: { nombre: 'Limpieza', descripcion: 'Por defecto solo ve la agenda operativa, sin precios ni contactos.' }
 };
 
@@ -811,7 +811,7 @@ function ocupacionMes_(ctx, mes) {
     cabanas: cabanas };
 }
 
-/** Seis meses calendario: el actual y los cinco anteriores. Sin detalle de transacciones. */
+/** Resumen de seis meses y detalle de todos los egresos, incluidos los históricos. */
 function adminGetFinance(token) {
   requireAdmin_(token, 'FINANZAS');
   ensureUpgrades_();
@@ -852,7 +852,8 @@ function adminGetFinance(token) {
     cabanaDe(r.CabanaID).meses[meses.indexOf(mes)].ingresos += monto;
   });
   // Los ingresos manuales legados no se suman para evitar duplicaciones.
-  readTable_('MovimientosFinancieros').rows.forEach(r => {
+  const movimientos = readTable_('MovimientosFinancieros').rows.filter(r => String(r.Tipo) === 'Egreso');
+  movimientos.forEach(r => {
     const mes = String(r.Fecha || '').slice(0, 7);
     const monto = Number(r.Monto);
     if (!mesIndex[mes] || String(r.Tipo) !== 'Egreso' ||
@@ -890,16 +891,23 @@ function adminGetFinance(token) {
   totales.ocupacion = totales.disponibles
     ? Math.round(1000 * totales.noches / totales.disponibles) / 10 : 0;
   return { periodo: { desde: meses[0], hasta: actual }, meses: resumen,
-    cabanas: cabanas, totales: totales, categorias: FIN_CATEGORIAS };
+    cabanas: cabanas, totales: totales, categorias: FIN_CATEGORIAS,
+    movimientos: movimientos.map(r => {
+      const out = {};
+      SCHEMA.MovimientosFinancieros.forEach(k => { out[k] = r[k] == null ? '' : r[k]; });
+      out.Estado = r.Estado || 'Activo';
+      out.CabanaNombre = (ctx.cabanas.find(c => String(c.ID) === String(r.CabanaID)) || {}).Nombre || r.CabanaID;
+      out.Version = financialVersion_(r);
+      return out;
+    }).sort((a, b) => String(b.Fecha).localeCompare(String(a.Fecha)) || String(b.Creado).localeCompare(String(a.Creado))) };
 }
 
-function adminAddFinancialMovement(token, entrada) {
-  const user = requireAdmin_(token, 'FINANZAS');
-  ensureUpgrades_();
+/** Validación compartida por alta y edición; permite conservar cabañas históricas. */
+function financialInput_(entrada, anterior) {
   const p = entrada || {};
   const fecha = fechaValida_(p.Fecha);
   const cabanaID = String(p.CabanaID || '');
-  if (!readTable_('Cabanas').rows.some(c => String(c.ID) === cabanaID)) throw new Error('Elegí una cabaña válida.');
+  if ((!anterior || String(anterior.CabanaID) !== cabanaID) && !readTable_('Cabanas').rows.some(c => String(c.ID) === cabanaID)) throw new Error('Elegí una cabaña válida.');
   if (p.Tipo && String(p.Tipo) !== 'Egreso') throw new Error('Los ingresos se generan desde las reservas.');
   const tipo = 'Egreso';
   const categoria = String(p.Categoria || '');
@@ -909,13 +917,53 @@ function adminAddFinancialMovement(token, entrada) {
   const concepto = celdaTextoSeguro_(p.Concepto, 160);
   if (concepto.replace(/^'/, '').length < 3) throw new Error('Describí el movimiento.');
   const referencia = celdaTextoSeguro_(p.Referencia, 80);
+  return { Fecha: fecha, CabanaID: cabanaID, Tipo: tipo, Categoria: categoria,
+    Concepto: concepto, Monto: monto, Referencia: referencia };
+}
+
+// Una copia canónica detecta también cambios hechos directamente en la hoja.
+function financialVersion_(r) {
+  return JSON.stringify(SCHEMA.MovimientosFinancieros.map(k => r[k] == null ? '' : r[k]));
+}
+
+function adminUpdateFinancialMovement(token, id, entrada, version) {
+  const user = requireAdmin_(token, 'FINANZAS');
+  ensureUpgrades_();
   const lock = LockService.getScriptLock();
   if (!lock.tryLock(20000)) throw new Error('Hay otra operación en curso. Probá de nuevo.');
   try {
-    appendObj_('MovimientosFinancieros', { ID: 'MF-' + Utilities.getUuid(), Fecha: fecha,
-      CabanaID: cabanaID, Tipo: tipo, Categoria: categoria, Concepto: concepto,
-      Monto: monto, Referencia: referencia, RegistradoPor: user.usuario,
-      Creado: new Date(), Estado: 'Activo', AnuladoPor: '', AnuladoEn: '' });
+    const r = readTable_('MovimientosFinancieros').rows.find(x => String(x.ID) === String(id));
+    if (!r || String(r.Tipo) !== 'Egreso' || String(r.Estado || 'Activo') !== 'Activo')
+      throw new Error('Solo se pueden editar egresos activos.');
+    if (typeof version !== 'string' || version !== financialVersion_(r))
+      throw new Error('Este egreso cambió desde que lo abriste. Actualizá Finanzas y volvé a abrirlo.');
+    const cambios = financialInput_(entrada, r);
+    let historial;
+    try { historial = JSON.parse(r.HistorialCambios || '[]'); } catch (e) { throw new Error('Revisá el historial de este egreso antes de editarlo.'); }
+    if (!Array.isArray(historial)) throw new Error('Historial de egreso inválido.');
+    const ahora = new Date().toISOString();
+    const anterior = {};
+    Object.keys(cambios).forEach(k => { anterior[k] = r[k]; });
+    historial.push({ fecha: ahora, usuario: user.usuario, anterior: anterior, nuevo: cambios });
+    const json = JSON.stringify(historial);
+    if (json.length > 45000) throw new Error('El historial alcanzó su límite. Conservá este registro y creá un egreso corregido anulando el anterior.');
+    updateObj_('MovimientosFinancieros', r._row, Object.assign({}, cambios, {
+      EditadoPor: user.usuario, EditadoEn: ahora, Revision: (Number(r.Revision) || 0) + 1,
+      HistorialCambios: json
+    }));
+  } finally { lock.releaseLock(); }
+  return adminGetFinance(token);
+}
+
+function adminAddFinancialMovement(token, entrada) {
+  const user = requireAdmin_(token, 'FINANZAS');
+  ensureUpgrades_();
+  const datos = financialInput_(entrada);
+  const lock = LockService.getScriptLock();
+  if (!lock.tryLock(20000)) throw new Error('Hay otra operación en curso. Probá de nuevo.');
+  try {
+    appendObj_('MovimientosFinancieros', Object.assign({}, datos, { ID: 'MF-' + Utilities.getUuid(), RegistradoPor: user.usuario,
+      Creado: new Date(), Estado: 'Activo', AnuladoPor: '', AnuladoEn: '', Revision: 1 }));
   } finally { lock.releaseLock(); }
   return adminGetFinance(token);
 }
@@ -927,7 +975,7 @@ function adminVoidFinancialMovement(token, id) {
   if (!lock.tryLock(20000)) throw new Error('Hay otra operación en curso. Probá de nuevo.');
   try {
     const r = readTable_('MovimientosFinancieros').rows.find(x => String(x.ID) === id);
-    if (!r || r.Estado !== 'Activo') throw new Error('Este movimiento no existe o ya fue anulado.');
+    if (!r || String(r.Estado || 'Activo') !== 'Activo') throw new Error('Este movimiento no existe o ya fue anulado.');
     if (String(r.Tipo) !== 'Egreso') throw new Error('Los ingresos anteriores se conservan como referencia.');
     updateObj_('MovimientosFinancieros', r._row,
       { Estado: 'Anulado', AnuladoPor: user.usuario, AnuladoEn: new Date() });
@@ -1374,7 +1422,12 @@ function adminCreateReservation(token, p) {
   requireAdmin_(token, 'RESERVAS');
   p = p || {};
   const estado = APP.ESTADOS.indexOf(p.estado) >= 0 ? p.estado : 'Confirmada';
-  const res = createCore_(p, { origen: 'Admin', estado: estado, admin: true, silent: !p.notificar });
+  ensureUpgrades_();
+  const manual = p.precioManual === true;
+  const canal = manual ? celdaTextoSeguro_(p.canal, 60) : '';
+  if (manual && !canal) throw new Error('Indicá el origen de la reserva externa.');
+  const res = createCore_(p, { origen: manual ? 'Externa · ' + canal : 'Admin', estado: estado,
+    admin: true, manual: manual, silent: !p.notificar });
   return { res: res, dashboard: adminGetDashboard(token) };
 }
 
@@ -2049,6 +2102,46 @@ function promoError_(promo, cab, tipo, checkIn, noches) {
   return '';
 }
 
+/** Reserva externa por rango, independiente de tarifas y descuentos publicados.
+ * Solo createCore_ con opt.admin + opt.manual (fijados por el servidor) la utiliza.
+ */
+function buildManualQuote_(p, ctx) {
+  const cab = ctx.cabanas.find(c => String(c.ID) === String(p.cabanaId));
+  if (!cab) throw new Error('Elegí una cabaña válida.');
+  const guests = Number(p.huespedes);
+  if (!Number.isSafeInteger(guests) || guests < 1 || guests > Number(cab.Capacidad))
+    throw new Error('Revisá la cantidad de huéspedes y la capacidad de la cabaña.');
+  const validDate = s => {
+    if (!isISO_(s)) return false;
+    const d = new Date(s + 'T12:00:00Z');
+    return !isNaN(d.getTime()) && d.toISOString().slice(0, 10) === s && s >= '2000-01-01' && s <= '2100-12-31';
+  };
+  if (!validDate(p.checkIn) || !validDate(p.checkOut)) throw new Error('Ingresá fechas válidas de llegada y salida.');
+  const noches = diffDays_(p.checkIn, p.checkOut);
+  if (noches < 1 || noches > 730) throw new Error('La salida debe ser posterior a la llegada (máximo 730 noches).');
+  const amount = (value, label) => {
+    if (value === '' || value === null || value === undefined) throw new Error('Completá ' + label + '.');
+    const n = Number(value);
+    if (!Number.isSafeInteger(n) || n < 0 || n > 1000000000000) throw new Error(label + ': ingresá un importe entero igual o mayor a cero.');
+    return n;
+  };
+  const total = amount(p.totalManual, 'el precio total');
+  const sena = amount(p.senaManual, 'la seña');
+  if (sena > total) throw new Error('La seña no puede superar el precio total.');
+  if (p.promo) throw new Error('El precio manual es final; no se le aplican promociones.');
+  const hora = String(p.hora || ctx.config.CHECKIN_HORA || '14:00');
+  if (!/^([01]\d|2[0-3]):[0-5]\d$/.test(hora)) throw new Error('Revisá la hora de llegada.');
+  return { cabanaId: cab.ID, cabanaNombre: cab.Nombre, ubicacion: cab.Ubicacion || '',
+    tipo: 'RANGO', tipoNombre: 'Reserva externa', modo: 'RANGO',
+    tarifaId: '', tarifaNombre: 'Precio manual · reserva externa', tarifa: null, paquete: false,
+    detalle: {}, huespedes: guests, checkIn: p.checkIn, checkOut: p.checkOut, hora: hora,
+    noches: noches, frecuencia: '',
+    ocurrencias: [{ checkIn: p.checkIn, checkOut: p.checkOut, subtotal: total, descuento: 0,
+      total: total, sena: sena, paquete: false }],
+    subtotal: total, tipoPct: 0, promoPct: 0, pct: 0, promoCodigo: '', promoMsg: '',
+    descuento: 0, total: total, senaPct: total ? Math.round(sena * 100 / total) : 0, sena: sena };
+}
+
 function createCore_(p, opt) {
   const lock = LockService.getScriptLock();
   if (!lock.tryLock(20000)) throw new Error('Hay muchas reservas en curso. Probá de nuevo en unos segundos.');
@@ -2069,7 +2162,7 @@ function createCore_(p, opt) {
       if (p.aceptaCondiciones !== true) throw new Error('Para reservar tenés que aceptar las condiciones de la reserva.');
       notaCondiciones = 'Aceptó condiciones ' + Utilities.formatDate(new Date(), tz_(), 'dd/MM/yyyy HH:mm') + '.';
     }
-    const q = buildQuote_(p, ctx, !!opt.admin);
+    const q = opt.admin && opt.manual ? buildManualQuote_(p, ctx) : buildQuote_(p, ctx, !!opt.admin);
     if (p.promo && q.promoMsg) throw new Error(q.promoMsg);
 
     const conf = conflicts_(q.cabanaId, q.ocurrencias, ctx.reservas, null);
@@ -3363,7 +3456,7 @@ function reservaOut_(r, ctx) {
   return {
     ID: String(r.ID), Codigo: String(r.Codigo).trim(), GrupoID: r.GrupoID || '',
     CabanaID: String(r.CabanaID || '').trim(), CabanaNombre: r.CabanaNombre || cab.Nombre || r.CabanaID,
-    TipoModo: r.TipoModo, TipoNombre: r.TipoNombre || tipo.Nombre || r.TipoModo,
+    TipoModo: r.TipoModo, TipoNombre: String(r.Origen || '').indexOf('Externa · ') === 0 ? 'Reserva externa' : (r.TipoNombre || tipo.Nombre || r.TipoModo),
     TarifaID: String(r.TarifaID || ''), TarifaNombre: String(r.TarifaNombre || ''), Paquete: isTrue_(r.Paquete),
     Cliente: r.Cliente, Email: r.Email, Telefono: String(r.Telefono || ''),
     Huespedes: num_(r.Huespedes, 0), CheckIn: r.CheckIn, CheckOut: r.CheckOut, HoraLlegada: String(r.HoraLlegada || ''),
