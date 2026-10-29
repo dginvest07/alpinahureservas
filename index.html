@@ -710,7 +710,7 @@ const S = {
   pending: null,
   lastRes: null,
   onConfirm: null,
-  ad: { token: null, user: null, panel: null, tab: 'resumen', d: null, fin: null, finCab: '', f: { q: '', estado: '', cab: '' }, days: 21, lastField: {}, tarCab: '' },
+  ad: { token: null, user: null, panel: null, tab: 'resumen', d: null, fin: null, finCab: '', finFiltro: { q: '', desde: '', hasta: '', categoria: '', estado: 'Activo' }, f: { q: '', estado: '', cab: '' }, days: 21, lastField: {}, tarCab: '' },
   st: null,
   stRange: '7'
 };
@@ -1858,7 +1858,7 @@ function aResumen() {
       <div><h1>Hola, ${esc(d.user.nombre)}</h1><p class="muted">${D.full(d.hoy)}</p></div>
       <div class="a-actions">
         <button class="btn btn-soft sm" data-a="openStaff">${ic('broom', 18)} Agenda de limpieza</button>
-        <button class="btn btn-primary sm" data-a="newRes">${ic('plus', 18)} Nueva reserva</button>
+        <button class="btn btn-primary sm" data-a="newRes">${ic('plus', 18)} Nueva reserva</button><button class="btn btn-outline sm" data-a="externalRes">Reserva externa · precio manual</button>
       </div>
     </div>
     ${sinTarifas.length ? `<p class="rem-status">${ic('info', 16)} ${sinTarifas.map(c => esc(c.Nombre)).join(', ')} todavía usa el precio base único. Cargá los tramos por cantidad de personas en <button class="link" data-a="aTab" data-t="tarifas">Tarifas</button>.</p>` : ''}
@@ -1943,23 +1943,76 @@ function aFinanzas() {
     ${seleccionada ? '' : `<section class="a-card mt16"><h2>Acumulado por cabaña · 6 meses</h2><div class="fin-table-wrap"><table class="table fin-table"><thead><tr><th>Cabaña</th><th>Ingresos</th><th>Egresos</th><th>Resultado</th></tr></thead><tbody>
       ${f.cabanas.map(c => `<tr><td>${esc(c.Nombre)}</td><td>${money(c.ingresos)}</td><td>${money(c.egresos)}</td><td class="${c.saldo < 0 ? 'fin-negative' : ''}">${money(c.saldo)}</td></tr>`).join('')}
     </tbody></table></div></section>`}
+    ${financeDetail()}
     <p class="muted small mt16">Ingresos: total de reservas no canceladas, asignado al mes de llegada, incluidas las pendientes. No equivale a cobros recibidos. Egresos: registros manuales activos. Los ingresos manuales antiguos quedan fuera de los totales.</p>`;
 }
 
-function newFinancialMovement() {
+function financeDetail() {
+  const z = S.ad.finFiltro;
+  return `<section class="a-card mt16"><h2>Detalle de egresos por concepto</h2>
+    <p class="muted small">Incluye todo el historial. Estos filtros afectan únicamente el listado y sus subtotales; el resumen superior conserva los últimos 6 meses.</p>
+    <div class="filters">
+      <input class="input search" data-live="finSearch" value="${esc(z.q)}" placeholder="Buscar concepto, referencia, cabaña u operador" aria-label="Buscar egresos">
+      <div class="field"><label>Desde</label><input class="input" type="date" data-fin-filter="desde" value="${esc(z.desde)}"></div>
+      <div class="field"><label>Hasta</label><input class="input" type="date" data-fin-filter="hasta" value="${esc(z.hasta)}"></div>
+      <select class="input" data-fin-filter="categoria" aria-label="Categoría"><option value="">Todas las categorías</option>${S.ad.fin.categorias.Egreso.map(c => `<option ${z.categoria === c ? 'selected' : ''}>${esc(c)}</option>`).join('')}</select>
+      <select class="input" data-fin-filter="estado" aria-label="Estado">${['Activo', 'Anulado', 'Todos'].map(s => `<option ${z.estado === s ? 'selected' : ''}>${s}</option>`).join('')}</select>
+      <button class="btn btn-outline sm" data-a="resetFin">Limpiar filtros</button>
+    </div><div id="finResults">${financeResults()}</div></section>`;
+}
+
+function filteredExpenses() {
+  const z = S.ad.finFiltro, q = normTxt(z.q).trim();
+  return (S.ad.fin.movimientos || []).filter(r =>
+    (!S.ad.finCab || r.CabanaID === S.ad.finCab) &&
+    (!z.desde || r.Fecha >= z.desde) && (!z.hasta || r.Fecha <= z.hasta) &&
+    (!z.categoria || r.Categoria === z.categoria) && (z.estado === 'Todos' || r.Estado === z.estado) &&
+    (!q || normTxt([r.Concepto, r.Categoria, r.Referencia, r.RegistradoPor, r.EditadoPor, r.CabanaNombre, r.ID].join(' ')).includes(q)));
+}
+
+function financeResults() {
+  const rows = filteredExpenses(), grupos = new Map();
+  rows.filter(r => r.Estado === 'Activo').forEach(r => {
+    const key = r.Concepto || 'Sin concepto';
+    grupos.set(key, (grupos.get(key) || 0) + Number(r.Monto));
+  });
+  const total = [...grupos.values()].reduce((a, n) => a + n, 0);
+  return `<p><b>${rows.length} egreso(s)</b> · Total activo filtrado: <b>${money(total)}</b></p>
+    ${grupos.size ? `<details class="mt12"><summary>Ver subtotales por concepto</summary><div class="fin-table-wrap"><table class="table"><thead><tr><th>Concepto</th><th>Total activo</th></tr></thead><tbody>${[...grupos].sort((a, b) => b[1] - a[1]).map(([c, n]) => `<tr><td>${esc(c)}</td><td>${money(n)}</td></tr>`).join('')}</tbody></table></div></details>` : ''}
+    <div class="fin-table-wrap mt16"><table class="table"><thead><tr><th>Fecha</th><th>Concepto / referencia</th><th>Categoría</th><th>Cabaña</th><th>Importe</th><th>Cargado por</th><th>Estado</th><th>Acciones</th></tr></thead><tbody>
+      ${rows.map(r => `<tr><td>${esc(r.Fecha)}</td><td><b>${esc(r.Concepto)}</b><div class="muted small">${esc(r.Referencia || 'Sin referencia')}</div></td><td>${esc(r.Categoria)}</td><td>${esc(r.CabanaNombre)}</td><td class="nw">${money(r.Monto)}</td><td>${esc(r.RegistradoPor)}<div class="muted small">${esc(r.Creado)}</div></td><td>${esc(r.Estado)}</td><td><div class="row-act"><button class="btn btn-outline sm" data-a="viewFin" data-id="${esc(r.ID)}">Detalle</button>${r.Estado === 'Activo' ? `<button class="btn btn-soft sm" data-a="editFin" data-id="${esc(r.ID)}">Editar</button>` : ''}</div></td></tr>`).join('') || '<tr><td colspan="8">No hay egresos con estos filtros.</td></tr>'}
+    </tbody></table></div>`;
+}
+
+function viewFinancialMovement(id) {
+  const r = S.ad.fin.movimientos.find(x => x.ID === id);
+  if (!r) return;
+  let history = [];
+  try { history = JSON.parse(r.HistorialCambios || '[]'); } catch (e) { /* registros antiguos */ }
+  if (!Array.isArray(history)) history = [];
+  const fields = [['Concepto', r.Concepto], ['Importe', money(r.Monto)], ['Fecha del gasto', r.Fecha], ['Cabaña', r.CabanaNombre], ['Categoría', r.Categoria], ['Referencia', r.Referencia], ['Estado', r.Estado], ['Cargado por', r.RegistradoPor], ['Fecha de carga', r.Creado], ['Editado por', r.EditadoPor], ['Última edición', r.EditadoEn], ['Anulado por', r.AnuladoPor], ['Anulado el', r.AnuladoEn], ['Identificador', r.ID]];
+  modal(`${mHead('Detalle del egreso', r.Concepto ? esc(r.Concepto) : '')}
+    ${fields.map(([k,v]) => `<div class="kv"><span>${k}</span><b>${esc(v || '—')}</b></div>`).join('')}
+    ${history.length ? `<h3 class="mt16">Historial de cambios</h3>${history.slice().reverse().map(h => `<details class="mt12"><summary>${esc(h.fecha)} · ${esc(h.usuario)}</summary>${Object.keys(h.nuevo || {}).filter(k => String((h.anterior || {})[k] || '') !== String(h.nuevo[k] || '')).map(k => `<p class="small"><b>${esc(k)}</b>: ${esc((h.anterior || {})[k])} → ${esc(h.nuevo[k])}</p>`).join('')}</details>`).join('')}` : ''}
+    <div class="m-foot"><button class="btn btn-outline" data-a="close">Cerrar</button>${r.Estado === 'Activo' ? `<button class="btn btn-primary" data-a="editFin" data-id="${esc(r.ID)}">Editar egreso</button><button class="btn btn-danger" data-a="voidFin" data-id="${esc(r.ID)}">Anular</button>` : ''}</div>`);
+}
+
+function newFinancialMovement(id) {
   const f = S.ad.fin;
   if (!f) return;
+  const r = typeof id === 'string' ? f.movimientos.find(x => x.ID === id) : null;
   const today = S.ad.d.hoy;
-  modal(`${mHead('Registrar egreso', 'El ingreso se genera automáticamente desde cada reserva.')}
-    <form id="finForm">
-      <div class="field"><label>Fecha</label><input class="input" type="date" name="Fecha" value="${esc(today)}" min="${esc(f.periodo.desde)}-01" max="${esc(today)}" required></div>
-      <div class="field"><label>Cabaña</label><select class="input" name="CabanaID" required>${f.cabanas.filter(c => c.disponible).map(c => `<option value="${esc(c.ID)}" ${c.ID === S.ad.finCab ? 'selected' : ''}>${esc(c.Nombre)}</option>`).join('')}</select></div>
-      <div class="field"><label>Categoría</label><select class="input" name="Categoria">${(f.categorias.Egreso || []).map(c => `<option>${esc(c)}</option>`).join('')}</select></div>
-      <div class="field"><label>Importe (número entero)</label><input class="input" type="number" name="Monto" min="1" max="1000000000000" step="1" required></div>
-      <div class="field"><label>Concepto</label><input class="input" name="Concepto" maxlength="160" required placeholder="Ej.: limpieza, electricidad, insumos…"></div>
-      <div class="field"><label>Referencia (opcional)</label><input class="input" name="Referencia" maxlength="80" placeholder="Factura, transferencia o código de reserva"></div>
-      <button class="btn btn-primary full" data-a="saveFin">Guardar egreso</button>
+  modal(`${mHead(r ? 'Editar egreso' : 'Registrar egreso', 'Se conserva el usuario de carga y el historial de modificaciones.')}
+    <form id="finForm" data-id="${esc(r ? r.ID : '')}">
+      <div class="field"><label>Fecha</label><input class="input" type="date" name="Fecha" value="${esc(r ? r.Fecha : today)}" min="2000-01-01" max="${esc(today)}" required></div>
+      <div class="field"><label>Cabaña</label><select class="input" name="CabanaID" required>${f.cabanas.filter(c => c.disponible || (r && c.ID === r.CabanaID)).map(c => `<option value="${esc(c.ID)}" ${c.ID === (r ? r.CabanaID : S.ad.finCab) ? 'selected' : ''}>${esc(c.Nombre)}</option>`).join('')}${r && !f.cabanas.some(c => c.ID === r.CabanaID) ? `<option value="${esc(r.CabanaID)}" selected>${esc(r.CabanaNombre)}</option>` : ''}</select></div>
+      <div class="field"><label>Categoría</label><select class="input" name="Categoria">${(f.categorias.Egreso || []).map(c => `<option ${r && r.Categoria === c ? 'selected' : ''}>${esc(c)}</option>`).join('')}</select></div>
+      <div class="field"><label>Importe (número entero)</label><input class="input" type="number" name="Monto" min="1" max="1000000000000" step="1" value="${r ? Number(r.Monto) : ''}" required></div>
+      <div class="field"><label>Concepto</label><textarea class="input" name="Concepto" minlength="3" maxlength="160" required placeholder="Ej.: limpieza posterior a reserva AH-…">${esc(r ? r.Concepto : '')}</textarea></div>
+      <div class="field"><label>Referencia (opcional)</label><input class="input" name="Referencia" maxlength="80" value="${esc(r ? r.Referencia : '')}" placeholder="Factura, transferencia o código de reserva"></div>
+      <button class="btn btn-primary full" data-a="saveFin">${r ? 'Guardar cambios' : 'Guardar egreso'}</button>
     </form>`);
+  $('#finForm').dataset.version = r ? r.Version : '';
 }
 
 function occGrid(days) {
@@ -1993,7 +2046,7 @@ function filteredRes() {
     if (cabF && String(r.CabanaID || '').trim() !== cabF) return false;
     if (!txt) return true;
     // Busca sin acentos ni mayúsculas en todos los campos visibles...
-    const campos = normTxt([r.Codigo, r.Cliente, r.Email, r.Telefono, r.CabanaNombre, r.TarifaNombre].join(' '));
+    const campos = normTxt([r.Codigo, r.Cliente, r.Email, r.Telefono, r.CabanaNombre, r.TarifaNombre, r.Origen].join(' '));
     if (campos.indexOf(txt) >= 0) return true;
     // ...y compara los teléfonos solo por sus dígitos, para que "0981 000 001" encuentre "0981000001"
     return dig.length >= 3 && soloDigitos(r.Telefono).indexOf(dig) >= 0;
@@ -2032,7 +2085,7 @@ function resRows() {
 function aReservas() {
   const d = S.ad.d, f = S.ad.f;
   return `<div class="a-head"><div><h1>Reservas</h1><p class="muted">${d.stats.totalActivas} activas de ${d.reservas.length} registradas.</p></div>
-      <div class="a-actions"><button class="btn btn-primary sm" data-a="newRes">${ic('plus', 18)} Nueva reserva</button></div></div>
+      <div class="a-actions"><button class="btn btn-primary sm" data-a="newRes">${ic('plus', 18)} Nueva reserva</button><button class="btn btn-outline sm" data-a="externalRes">Reserva externa · precio manual</button></div></div>
     <div class="filters">
       <input class="input search" placeholder="Buscar por código, nombre, email o teléfono" value="${esc(f.q)}" data-live="resSearch" aria-label="Buscar reservas">
       <select class="input" data-in="ad.f.estado" data-rr aria-label="Filtrar por estado"><option value="">Todos los estados</option>
@@ -2090,6 +2143,40 @@ async function saveRes(id) {
   toast(nuevo && String(nuevo.Estado).trim() === String(f.Estado).trim()
     ? 'Reserva actualizada. El calendario también.'
     : 'Se guardaron las notas, pero revisá el estado con diagnostico() en Apps Script.');
+}
+
+function openExternalRes() {
+  const d = S.ad.d;
+  modal(`${mHead('Reserva externa · bloquear fechas', 'El precio total es por toda la estadía, en la misma moneda de la app.')}
+    <form id="externalForm">
+      <div class="field"><label>Cabaña</label><select class="input" name="cabanaId" required>${d.cabanas.map(c => `<option value="${esc(c.ID)}">${esc(c.Nombre)}</option>`).join('')}</select></div>
+      <div class="grid2"><div class="field"><label>Llegada</label><input class="input" type="date" name="checkIn" value="${esc(d.hoy)}" required></div><div class="field"><label>Salida</label><input class="input" type="date" name="checkOut" value="${D.add(d.hoy, 1)}" required></div></div>
+      <p class="hint">Se ocupan las noches desde la llegada hasta el día anterior a la salida. No permite superponer reservas activas.</p>
+      <div class="grid2"><div class="field"><label>Cliente</label><input class="input" name="cliente" minlength="3" maxlength="80" required></div><div class="field"><label>Huéspedes</label><input class="input" type="number" name="huespedes" min="1" step="1" value="2" required></div></div>
+      <div class="grid2"><div class="field"><label>Teléfono</label><input class="input" name="telefono" maxlength="30"></div><div class="field"><label>Email (opcional)</label><input class="input" type="email" name="email" maxlength="120"></div></div>
+      <div class="field"><label>Origen / canal</label><input class="input" name="canal" maxlength="60" placeholder="WhatsApp, Airbnb, Instagram, contacto directo…" required></div>
+      <div class="grid2"><div class="field"><label>Precio total acordado</label><input class="input" name="totalManual" type="number" min="0" max="1000000000000" step="1" required></div><div class="field"><label>Seña acordada (0 si no corresponde)</label><input class="input" name="senaManual" type="number" min="0" max="1000000000000" step="1" value="0" required></div></div>
+      <p class="hint">El total es final: no se aplican tarifas ni descuentos automáticos. La seña no registra un cobro recibido. Total 0 permite registrar una estadía de cortesía.</p>
+      <div class="grid2"><div class="field"><label>Estado</label><select class="input" name="estado"><option>Confirmada</option><option>Pendiente</option><option>Completada</option></select></div><div class="field"><label>Hora de llegada</label><input class="input" type="time" name="hora" value="${esc(d.config.CHECKIN_HORA || '14:00')}" required></div></div>
+      <div class="field"><label>Notas internas</label><textarea class="input" name="notas" maxlength="500"></textarea></div>
+      <label class="check"><input type="checkbox" name="notificar"> Enviar avisos de la reserva por los canales configurados</label>
+      <div class="m-foot"><button class="btn btn-outline" data-a="close">Cancelar</button><button class="btn btn-primary" data-a="saveExternalRes">Guardar y bloquear fechas</button></div>
+    </form>`);
+}
+
+async function saveExternalRes() {
+  const form = $('#externalForm');
+  if (!form.reportValidity()) return;
+  const f = formData(form);
+  f.precioManual = true;
+  const r = await adminCall('adminCreateReservation', f);
+  if (r) {
+    S.ad.d = r.dashboard;
+    closeModal();
+    refreshPublicSoon();
+    render();
+    toast(`Reserva externa ${r.res.codigo} guardada. Fechas ocupadas.`);
+  }
 }
 
 function openNewRes() {
@@ -2164,6 +2251,7 @@ async function saveNewRes() {
     S.ad.d = r.dashboard;
     closeModal();
     render();
+    refreshPublicSoon();
     toast(`Reserva ${r.res.codigo} creada.`);
   }
 }
@@ -3058,12 +3146,25 @@ const A = {
     const ok = await adminCall('adminChangePassword', f.actual, f.nueva);
     if (ok) { closeModal(); endSession('Contraseña actualizada. Ingresá otra vez.'); }
   },
-  newFin: newFinancialMovement,
+  externalRes: openExternalRes,
+  saveExternalRes,
+  newFin() { newFinancialMovement(); },
+  editFin(el) { newFinancialMovement(el.dataset.id); },
+  viewFin(el) { viewFinancialMovement(el.dataset.id); },
+  resetFin() { S.ad.finFiltro = { q: '', desde: '', hasta: '', categoria: '', estado: 'Activo' }; S.ad.finCab = ''; render(); },
+  voidFin(el) {
+    confirmBox('Anular egreso', 'Se conserva el registro y se excluye de los totales. Esta acción no se puede deshacer desde la app.', 'Anular', async () => {
+      const f = await adminCall('adminVoidFinancialMovement', el.dataset.id);
+      if (f) { S.ad.fin = f; closeModal(); render(); toast('Egreso anulado.'); }
+    }, true);
+  },
   async saveFin() {
     const form = $('#finForm');
     if (!form.reportValidity()) return;
-    const f = await adminCall('adminAddFinancialMovement', formData(form));
-    if (f) { S.ad.fin = f; closeModal(); render(); toast('Egreso registrado.'); }
+    const id = form.dataset.id;
+    const f = id ? await adminCall('adminUpdateFinancialMovement', id, formData(form), form.dataset.version)
+      : await adminCall('adminAddFinancialMovement', formData(form));
+    if (f) { S.ad.fin = f; closeModal(); render(); toast(id ? 'Egreso actualizado.' : 'Egreso registrado.'); }
   },
   editUser(el) { editUser(el.dataset.u); },
   async saveUser() {
@@ -3264,6 +3365,11 @@ const A = {
   }
 };
 
+document.addEventListener('submit', e => {
+  if (e.target.id === 'finForm') { e.preventDefault(); A.saveFin(); }
+  if (e.target.id === 'externalForm') { e.preventDefault(); saveExternalRes(); }
+});
+
 document.addEventListener('click', e => {
   const el = e.target.closest('[data-a]');
   if (!el) return;
@@ -3275,6 +3381,7 @@ document.addEventListener('click', e => {
 });
 
 document.addEventListener('change', e => {
+  if (e.target.dataset.finFilter) { S.ad.finFiltro[e.target.dataset.finFilter] = e.target.value; $('#finResults').innerHTML = financeResults(); return; }
   if (e.target.id === 'finCab') { S.ad.finCab = e.target.value; render(); return; }
   const el = e.target;
   if (el.dataset.in) {
@@ -3339,6 +3446,7 @@ document.addEventListener('change', e => {
 
 document.addEventListener('input', e => {
   const el = e.target;
+  if (el.dataset.live === 'finSearch') { S.ad.finFiltro.q = el.value; $('#finResults').innerHTML = financeResults(); return; }
   if (el.dataset.live === 'resSearch') {
     S.ad.f.q = el.value;
     $('#resTable').innerHTML = resRows();
