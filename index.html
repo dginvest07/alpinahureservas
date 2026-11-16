@@ -557,6 +557,23 @@ textarea {
     overflow-wrap: break-word;
   }
 }
+
+.dash-current{border:2px solid var(--primary);padding:24px}
+.dash-current h2{font-size:26px;margin:8px 0 20px}
+.dash-eyebrow{font-size:12px;letter-spacing:.12em;color:var(--primary);font-weight:700}
+.dash-kpis{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:12px}
+.dash-kpis .stat{min-width:0;background:var(--surface)}
+.dash-kpis .stat.hl{background:var(--primary)}
+.dash-kpis .stat b{white-space:normal;overflow-wrap:anywhere;font-size:clamp(22px,2.4vw,34px)}
+.dash-kpis small{display:block;margin-top:8px;line-height:1.5}
+.dash-annual .stat b{font-size:23px}
+.dash-history h2{font-size:18px}
+.dash-history .table{font-size:13px;min-width:540px;width:100%}
+.dash-history .table td,.dash-history .table th{padding:9px 12px}
+.dash-current-row{font-weight:700;background:var(--surface)}
+@media(max-width:1100px){.dash-kpis{grid-template-columns:repeat(2,minmax(0,1fr))}}
+@media(max-width:520px){.dash-current{padding:16px}.dash-kpis{grid-template-columns:1fr}.dash-current h2{font-size:23px}}
+
 </style>
 </head>
 <body>
@@ -1164,6 +1181,17 @@ function promoCheck(code, n) {
   return { ok: true, promo: p, msg: `${p.DescuentoPct}% de descuento aplicado.` };
 }
 
+function precioEspecial(bloques, cabanaId, inicio, salida, modo) {
+  const fin = modo === 'DIA' ? inicio : salida;
+  const cruces = (bloques || []).filter(x => x.Activa && String(x.CabanaID) === String(cabanaId) &&
+    (modo === 'DIA' ? inicio >= x.FechaInicio && inicio < x.FechaFin : inicio < x.FechaFin && fin > x.FechaInicio));
+  const bloque = cruces.find(x => x.Modalidad === 'BLOQUE');
+  if (bloque && (modo === 'DIA' || inicio !== bloque.FechaInicio || salida !== bloque.FechaFin))
+    throw new Error('"' + bloque.Nombre + '" se reserva como bloque completo: llegada ' + bloque.FechaInicio + ', salida ' + bloque.FechaFin + '. Elegí exactamente esas fechas.');
+  if (modo === 'DIA' && cruces.length) throw new Error('Estas fechas tienen tarifa especial de estadía nocturna; no admiten reservas de día.');
+  return { bloque: bloque || null, noches: cruces.filter(x => x.Modalidad === 'NOCHE') };
+}
+
 function estimate() {
   const b = S.bk, c = cab(), t = tipo(), cfg = S.data.config;
   if (!c || !t || !b.ci) return null;
@@ -1173,13 +1201,7 @@ function estimate() {
 
   const gTarifa = huespedesParaTarifa(modo, b.g);
   const tar = tarifaPara(c, gTarifa);
-  if ((c.Tarifas || []).length && !tar) {
-    return {
-      sinTarifa: true, modo, n, g: b.g, occ: [], subtotal: 0, total: 0, sena: 0, descuento: 0, pct: 0,
-      tipoPct: 0, promoPct: 0, paquete: false, tarifa: null, detalle: null, pc: null,
-      errors: [`Para ${plural(b.g, 'huésped', 'huéspedes')} no hay una tarifa cargada en ${c.Nombre}. Escribinos y la armamos a medida.`]
-    };
-  }
+
 
   let occ = [{ ci: b.ci, co: modo === 'DIA' ? b.ci : b.co }];
   if (modo === 'RECURRENTE') {
@@ -1198,10 +1220,20 @@ function estimate() {
     deepWork: 0
   };
 
+  const errors = [];
   occ.forEach(o => {
     o.free = isFree(c.ID, o.ci, o.co);
+    let especial;
+    try { especial = precioEspecial(S.data.bloques, c.ID, o.ci, o.co, modo); }
+    catch (e) { errors.push(e.message); o.sub = 0; o.especialFijo = 0; return; }
+    o.especialFijo = 0;
+    if (especial.bloque) {
+      o.sub = Number(especial.bloque.Precio); o.especialFijo = o.sub;
+      o.bloqueNombre = especial.bloque.Nombre; o.paquete = false; return;
+    }
     let s = 0;
     if (modo === 'DIA') {
+      if ((c.Tarifas || []).length && !tar) errors.push('No hay tarifa para esta cantidad de huéspedes.');
       // Se calcula sobre el precio diario de este tramo de huéspedes y de esta fecha.
       s = Math.round(precioNoche(tar, c, gTarifa, PR.esFinde(o.ci), false) * cfg.deepWorkPct / 100);
       det.deepWork = s;
@@ -1209,8 +1241,11 @@ function estimate() {
     } else {
       const fechas = [];
       for (let i = 0; i < n; i++) fechas.push(D.add(o.ci, i));
-      o.paquete = aplicaPaquete(tar, fechas);
+      o.paquete = !especial.noches.length && aplicaPaquete(tar, fechas);
       fechas.forEach(f => {
+        const especialNoche = especial.noches.find(x => f >= x.FechaInicio && f < x.FechaFin);
+        if (especialNoche) { s += Number(especialNoche.Precio); o.especialFijo += Number(especialNoche.Precio); return; }
+        if ((c.Tarifas || []).length && !tar) errors.push('No hay tarifa para esta cantidad de huéspedes.');
         const finde = PR.esFinde(f);
         s += precioNoche(tar, c, gTarifa, finde, o.paquete);
         if (o.paquete) det.nochesPaquete++;
@@ -1221,8 +1256,7 @@ function estimate() {
     o.sub = s;
   });
 
-  const errors = [];
-  if (modo !== 'DIA') {
+  if (modo !== 'DIA' && !occ.every(o => o.bloqueNombre)) {
     if (t.MinNoches && n < t.MinNoches) errors.push(`${t.Nombre} requiere al menos ${t.MinNoches} noches.`);
     if (t.MaxNoches && n > t.MaxNoches) errors.push(`${t.Nombre} permite hasta ${t.MaxNoches} noches.`);
   }
@@ -1239,10 +1273,11 @@ function estimate() {
   const tipoPct = t.DescuentoPct || 0;
   const promoPct = pc && pc.ok ? pc.promo.DescuentoPct : 0;
   const pct = Math.min(tipoPct + promoPct, cfg.maxDescuento);
-  const descuento = Math.round(subtotal * pct / 100);
+  const especialTotal = occ.reduce((a, o) => a + (o.especialFijo || 0), 0);
+  const descuento = occ.reduce((a, o) => a + Math.round((o.sub - (o.especialFijo || 0)) * pct / 100), 0);
   const total = subtotal - descuento;
   return {
-    modo, n, g: b.g, occ, subtotal, tipoPct, promoPct, pct, descuento, total,
+    modo, n, g: b.g, occ, subtotal, especialTotal, tipoPct, promoPct, pct, descuento, total,
     sena: Math.round(total * cfg.senaPct / 100),
     tarifa: tar, paquete: occ.some(o => o.paquete), detalle: det, errors, pc
   };
@@ -1367,6 +1402,7 @@ function summaryBox(est) {
     if (d.nochesSemana) lineas.push([`${plural(d.nochesSemana, 'noche', 'noches')} ${txtSemana().toLowerCase()} × ${money(d.precioSemana)}`, money(d.nochesSemana * d.precioSemana)]);
     if (d.nochesFinde) lineas.push([`${plural(d.nochesFinde, 'noche', 'noches')} ${txtFinde().toLowerCase()} × ${money(d.precioFinde)}`, money(d.nochesFinde * d.precioFinde)]);
   }
+  if (est.especialTotal) lineas.push(['Tarifas especiales · precio fijo sin descuentos', money(est.especialTotal)]);
   const tar = est.tarifa;
   return `<div class="summary mt16">
     ${tar ? `<div class="head"><b>${esc(tar.Nombre || plural(est.g, 'persona', 'personas'))}</b><span class="muted small">${plural(est.g, 'huésped', 'huéspedes')}</span></div>` : ''}
@@ -1374,9 +1410,10 @@ function summaryBox(est) {
     ${est.paquete ? `<p class="pill-paq" style="margin:2px 0 8px">${ic('zap', 13)} Paquete entre semana aplicado</p>` : ''}
     ${lineas.map(l => `<div class="line"><span>${l[0]}${veces && est.modo !== 'DIA' ? '' : ''}</span><b>${l[1]}</b></div>`).join('')}
     ${est.occ.length > 1 ? `<div class="line"><span class="small">Incluye las ${est.occ.length} estadías programadas</span></div>` : ''}
-    ${est.tipoPct ? `<div class="line disc"><span>${esc(t.Nombre)} (-${est.tipoPct}%)</span><b>-${money(est.subtotal * est.tipoPct / 100)}</b></div>` : ''}
-    ${est.promoPct ? `<div class="line disc"><span>Código ${esc(S.bk.promo)} (-${est.promoPct}%)</span><b>-${money(est.subtotal * est.promoPct / 100)}</b></div>` : ''}
+    ${est.tipoPct && !est.especialTotal ? `<div class="line disc"><span>${esc(t.Nombre)} (-${est.tipoPct}%)</span><b>-${money(est.subtotal * est.tipoPct / 100)}</b></div>` : ''}
+    ${est.promoPct && !est.especialTotal ? `<div class="line disc"><span>Código ${esc(S.bk.promo)} (-${est.promoPct}%)</span><b>-${money(est.subtotal * est.promoPct / 100)}</b></div>` : ''}
     ${est.pct < est.tipoPct + est.promoPct ? `<div class="line"><span class="small">Descuento máximo acumulable: ${est.pct}%</span></div>` : ''}
+    ${est.especialTotal && est.descuento ? `<div class="line disc"><span>Descuento solo sobre noches de tarifa regular</span><b>-${money(est.descuento)}</b></div>` : ''}
     <div class="total"><span>Total</span><b>${money(est.total)}</b></div>
     ${est.sena ? `<div class="sena"><span>Seña para confirmar (${cfg.senaPct}%)</span><span>${money(est.sena)}</span></div>` : ''}
   </div>`;
@@ -1431,6 +1468,7 @@ function vBooking() {
         <h2 class="section-h">${ic(t.Icono)} Tipo de reserva</h2>
         <div class="chips">${chips}</div>
         <p class="type-desc">${esc(t.Descripcion)}</p>
+        ${(S.data.bloques || []).some(x => x.CabanaID === c.ID && x.FechaFin > S.data.hoy) ? `<div class="panel mt12"><b>Fechas con precios especiales</b><p class="hint">Precio por cabaña hasta su capacidad máxima. La fecha final es la salida; no incluye esa noche.</p>${(S.data.bloques || []).filter(x => x.CabanaID === c.ID && x.FechaFin > S.data.hoy).map(x => `<div class="mt12"><b>${esc(x.Nombre)}</b><p>${D.short(x.FechaInicio)} → ${D.short(x.FechaFin)} · ${money(x.Precio)} ${x.Modalidad === 'BLOQUE' ? 'el bloque completo' : 'por noche'}</p>${x.Modalidad === 'BLOQUE' ? `<button class="btn btn-soft sm" data-a="pickBloque" data-id="${esc(x.ID)}" ${x.FechaInicio < S.data.hoy ? 'disabled' : ''}>Elegir bloque completo</button>` : ''}</div>`).join('')}</div>` : ''}
         <h2 class="section-h">${ic('calendar')} Fecha y hora</h2>
         ${calendarWidget()}
         <p class="cal-hint ${hint.err ? 'err' : ''}" aria-live="polite">${hint.text}</p>
@@ -1850,48 +1888,40 @@ function waGuestText(r) {
 const fechasRes = r => r.CheckIn === r.CheckOut ? `${D.short(r.CheckIn)} ${esc(r.HoraLlegada)}` : `${D.short(r.CheckIn)} al ${D.short(r.CheckOut)}`;
 
 function aResumen() {
-  const d = S.ad.d, s = d.stats;
-  const proximas = d.reservas.filter(r => r.Estado !== 'Cancelada' && r.CheckIn >= d.hoy)
-    .sort((a, b) => a.CheckIn.localeCompare(b.CheckIn)).slice(0, 6);
-  const sinTarifas = d.cabanas.filter(c => c.Activa && !(c.Tarifas || []).length);
-  return `<div class="a-head">
-      <div><h1>Hola, ${esc(d.user.nombre)}</h1><p class="muted">${D.full(d.hoy)}</p></div>
-      <div class="a-actions">
-        <button class="btn btn-soft sm" data-a="openStaff">${ic('broom', 18)} Agenda de limpieza</button>
-        <button class="btn btn-primary sm" data-a="newRes">${ic('plus', 18)} Nueva reserva</button><button class="btn btn-outline sm" data-a="externalRes">Reserva externa · precio manual</button>
+  const d = S.ad.d, resumen = d.resumenFinanciero;
+  if (!resumen) return '<section class="a-card"><h2>Resumen no disponible</h2><p>Actualizá ambos archivos de la app y verificá el permiso Resumen.</p></section>';
+  const m = resumen.actual, a = resumen.anual;
+  const nombreMes = mes => cap1(D.parse(mes + '-01').toLocaleDateString('es-PY', { month: 'long', year: 'numeric' }));
+  const mesesTexto = meses => meses.map(nombreMes).join(' · ');
+  const pct = n => n == null ? '—' : n + '%';
+  return `<div class="a-head"><div><h1>Resumen del negocio</h1><p class="muted">${D.full(d.hoy)}</p></div>
+      <div class="a-actions"><button class="btn btn-primary sm" data-a="newRes">${ic('plus', 18)} Nueva reserva</button></div></div>
+    <section class="a-card dash-current">
+      <span class="dash-eyebrow">MES EN CURSO</span><h2>${esc(nombreMes(m.mes))}</h2>
+      <div class="dash-kpis">
+        <div class="stat"><span>Ingresos del mes</span><b>${money(m.ingresos)}</b><small>Reservas por fecha de llegada</small></div>
+        <div class="stat"><span>Egresos del mes</span><b>${money(m.egresos)}</b><small>Egresos activos registrados</small></div>
+        <div class="stat hl"><span>Saldo del mes</span><b>${money(m.saldo)}</b><small>Ingresos menos egresos</small></div>
+        <div class="stat"><span>Ocupación del mes</span><b>${pct(m.ocupacion)}</b><small>${m.ocupados} / ${m.disponibles} días${m.cabanas.length > 1 ? '-cabaña' : ''} · ${m.diasBase} días transcurridos</small></div>
       </div>
-    </div>
-    ${sinTarifas.length ? `<p class="rem-status">${ic('info', 16)} ${sinTarifas.map(c => esc(c.Nombre)).join(', ')} todavía usa el precio base único. Cargá los tramos por cantidad de personas en <button class="link" data-a="aTab" data-t="tarifas">Tarifas</button>.</p>` : ''}
-    <div class="stats">
-      <div class="stat hl"><span>Llegadas hoy</span><b>${s.llegadasHoy}</b></div>
-      <div class="stat"><span>Huéspedes en casa</span><b>${s.enCasa}</b></div>
-      <div class="stat"><span>Pendientes de seña</span><b>${s.pendientes}</b></div>
-      <div class="stat"><span>Ingresos imputados de reservas</span><b>${money(s.ingresosMes)}</b></div>
-      <div class="stat"><span>Ocupación nocturna del mes</span><b>${s.ocupacionMes}%</b><small>${s.ocupacionDetalle.noches}/${s.ocupacionDetalle.disponibles} noches</small></div>
-    </div>
-    <section class="a-card" style="margin-bottom:16px"><h2>Ocupación por cabaña · ${esc(s.ocupacionDetalle.mes)}</h2>
-      <div class="fin-table-wrap"><table class="table fin-table"><thead><tr><th>Cabaña</th><th>Noches ocupadas</th><th>Noches disponibles</th><th>Ocupación</th><th>Reservas de día</th></tr></thead>
-      <tbody>${s.ocupacionDetalle.cabanas.map(c => `<tr><td>${esc(c.Nombre)}${c.Activa ? '' : ' (inactiva)'}</td><td>${c.noches}</td><td>${c.disponibles}</td><td>${c.porcentaje == null ? '—' : c.porcentaje + '%'}</td><td>${c.usosDia}</td></tr>`).join('')}</tbody></table></div>
-      <p class="muted small">Noches únicas de reservas no canceladas; los usos de día se informan aparte. La capacidad disponible usa las cabañas activas actualmente.</p>
+      <p class="muted small">Días ocupados hasta hoy inclusive ÷ días transcurridos del mes. Excluye fechas futuras e incluye usos de día y reservas no canceladas; cada fecha se cuenta una sola vez por cabaña. El día de salida no se cuenta en estadías nocturnas.</p>
     </section>
-    <div class="a-grid2">
-      <section class="a-card"><h2>Próximas llegadas</h2>
-        ${proximas.length ? proximas.map(r => {
-          const dt = D.parse(r.CheckIn);
-          const wa = waLink(r.Telefono, waGuestText(r));
-          const waR = waLink(r.Telefono, reminderText(r));
-          return `<div class="arr">
-            <div class="datebox"><b>${dt.getDate()}</b><small>${dt.toLocaleDateString('es-PY', { month: 'short' }).replace('.', '')}</small></div>
-            <div class="who"><b>${esc(r.Cliente)}</b><span class="muted small">${esc(r.CabanaNombre)}, ${r.Huespedes} pax${r.TarifaNombre ? ', ' + esc(r.TarifaNombre) : ''}</span></div>
-            ${stPill(r.Estado)}
-            ${waR ? `<a class="icon-btn" href="${waR}" target="_blank" rel="noopener" aria-label="Enviar recordatorio por WhatsApp" title="Recordatorio por WhatsApp">${ic('bell', 18)}</a>` : ''}
-            ${wa ? `<a class="icon-btn" href="${wa}" target="_blank" rel="noopener" aria-label="Enviar reserva por WhatsApp" title="Reserva por WhatsApp">${ic('message', 18)}</a>` : ''}
-          </div>`;
-        }).join('') : '<p class="empty">No hay llegadas programadas.</p>'}
-      </section>
-      <section class="a-card"><div class="row-between"><h2>Ocupación próximos 14 días</h2><button class="link small" data-a="aTab" data-t="calendario">Ver más</button></div>
-        ${occGrid(14)}</section>
-    </div>`;
+    <section class="a-card mt16"><h2>Indicadores del año · ${esc(a.anio)}</h2>
+      <p class="muted small">Enero a ${esc(nombreMes(m.mes))} · ${a.cantidadMeses} meses, incluido el mes actual parcial. Incluye meses sin ingresos; excluye meses futuros.</p>
+      <div class="dash-kpis dash-annual">
+        <div class="stat"><span>Ingreso promedio mensual</span><b>${money(a.ingresoPromedio)}</b><small>Ingresos del período ÷ ${a.cantidadMeses} meses</small></div>
+        <div class="stat"><span>Ocupación promedio</span><b>${pct(a.ocupacionPromedio)}</b><small>Días ocupados ÷ días disponibles hasta hoy</small></div>
+        <div class="stat"><span>Ingreso mensual más bajo</span><b>${money(a.minimo)}</b><small>${esc(mesesTexto(a.mesesMinimo))}</small></div>
+        <div class="stat"><span>Ingreso mensual más alto</span><b>${money(a.maximo)}</b><small>${esc(mesesTexto(a.mesesMaximo))}</small></div>
+      </div>
+    </section>
+    <section class="a-card mt16 dash-history"><h2>Últimos 6 meses</h2><p class="muted small">Mes actual y cinco anteriores.</p>
+      <div class="fin-table-wrap"><table class="table"><thead><tr><th>Mes</th><th>Ingresos</th><th>Egresos</th><th>Saldo</th></tr></thead><tbody>
+      ${resumen.meses.map(x => `<tr class="${x.mes === m.mes ? 'dash-current-row' : ''}"><td>${esc(nombreMes(x.mes))}${x.mes === m.mes ? ' · en curso' : ''}</td><td>${money(x.ingresos)}</td><td>${money(x.egresos)}</td><td class="${x.saldo < 0 ? 'fin-negative' : ''}">${money(x.saldo)}</td></tr>`).join('')}
+      </tbody></table></div>
+    </section>
+    ${m.cabanas.length > 1 ? `<section class="a-card mt16"><h2>Ocupación del mes por cabaña</h2><div class="fin-table-wrap"><table class="table"><thead><tr><th>Cabaña</th><th>Días ocupados</th><th>Días transcurridos</th><th>Ocupación</th></tr></thead><tbody>${m.cabanas.map(c => `<tr><td>${esc(c.nombre)}</td><td>${c.ocupados}</td><td>${c.disponibles}</td><td>${pct(c.ocupacion)}</td></tr>`).join('')}</tbody></table></div></section>` : ''}
+    <p class="muted small mt16">Los ingresos representan el total de reservas imputadas al mes de llegada, no cobros efectivos. La ocupación usa las cabañas activas actualmente; no hay historial de altas y bajas de capacidad.</p>`;
 }
 
 async function loadFinance() {
@@ -2413,6 +2443,32 @@ async function saveCab() {
 
 /* ---------------- Tarifas por cantidad de personas ---------------- */
 
+function bloquesPanel() {
+  const d = S.ad.d, lista = (d.bloques || []).filter(x => !S.ad.tarCab || x.CabanaID === S.ad.tarCab);
+  return `<section class="a-card" style="margin-bottom:20px"><div class="row-between"><h2>Bloques y fechas especiales</h2><button class="btn btn-primary sm" data-a="editBloque">Nuevo precio especial</button></div>
+    <p class="hint">Bloque completo: llegada y salida obligatorias, con precio total fijo. Por noche: precio fijo en las noches del rango. No se acumulan descuentos en fechas especiales. Las reservas existentes conservan su precio.</p>
+    <div class="fin-table-wrap"><table class="table"><thead><tr><th>Nombre / cabaña</th><th>Llegada → salida</th><th>Modalidad / precio</th><th>Estado</th><th></th></tr></thead><tbody>${lista.map(x => `<tr><td>${esc(x.Nombre)}<br><small>${esc((d.cabanas.find(c => c.ID === x.CabanaID) || {}).Nombre || x.CabanaID)}</small></td><td>${esc(x.FechaInicio)} → ${esc(x.FechaFin)}</td><td>${x.Modalidad === 'BLOQUE' ? 'Bloque completo' : 'Por noche'}<br>${money(x.Precio)}</td><td>${x.Activa ? 'Activo' : 'Inactivo'}</td><td><button class="btn btn-soft sm" data-a="editBloque" data-id="${esc(x.ID)}">Editar</button></td></tr>`).join('') || '<tr><td colspan="5">Todavía no hay fechas especiales.</td></tr>'}</tbody></table></div></section>`;
+}
+function editBloque(id) {
+  const d = S.ad.d;
+  if (!d.cabanas.length) return toast('Primero cargá una cabaña.');
+  const x = (d.bloques || []).find(x => x.ID === id) || { ID: '', CabanaID: S.ad.tarCab || d.cabanas[0].ID, Nombre: '', FechaInicio: '', FechaFin: '', Modalidad: 'BLOQUE', Precio: '', Activa: true };
+  modal(`${mHead(x.ID ? 'Editar precio especial' : 'Nuevo precio especial', 'Ejemplo: Navidad, llegada 24/12 y salida 26/12. Son dos noches.')}
+    <div id="bloqueForm"><input type="hidden" name="ID" value="${esc(x.ID)}">
+      <div class="field"><label>Nombre</label><input class="input" name="Nombre" value="${esc(x.Nombre)}" placeholder="Navidad"></div>
+      <div class="field"><label>Cabaña</label><select class="input" name="CabanaID">${d.cabanas.map(c => `<option value="${esc(c.ID)}" ${c.ID === x.CabanaID ? 'selected' : ''}>${esc(c.Nombre)}</option>`).join('')}</select></div>
+      <div class="grid2"><div class="field"><label>Fecha de llegada / primera noche</label><input class="input" type="date" name="FechaInicio" value="${esc(x.FechaInicio)}"></div><div class="field"><label>Fecha de salida (no incluye esa noche)</label><input class="input" type="date" name="FechaFin" value="${esc(x.FechaFin)}"></div></div>
+      <div class="field"><label>Modalidad</label><select class="input" name="Modalidad"><option value="BLOQUE" ${x.Modalidad === 'BLOQUE' ? 'selected' : ''}>Bloque completo obligatorio · precio total</option><option value="NOCHE" ${x.Modalidad === 'NOCHE' ? 'selected' : ''}>Precio por noche dentro del rango</option></select></div>
+      <div class="field"><label>Precio fijo por cabaña (${esc(d.config.SIMBOLO || 'Gs.')})</label><input class="input" type="number" min="1" step="1" name="Precio" value="${x.Precio}"></div>
+      <p class="hint">El precio cubre hasta la capacidad de la cabaña. En bloque completo se deben elegir exactamente estas fechas; no se permite reservar solo una parte ni extender la estadía. Desactivá el precio para dejar de ofrecerlo. No admite reservas de día.</p>
+      <label class="check"><input type="checkbox" name="Activa" ${x.Activa ? 'checked' : ''}> Activo</label>
+      <div class="m-foot"><button class="btn btn-outline" data-a="close">Cancelar</button><button class="btn btn-primary" data-a="saveBloque">Guardar</button></div></div>`, 'wide');
+}
+async function saveBloque() {
+  const d = await adminCall('adminSaveBloque', formData($('#bloqueForm')));
+  if (d) { closeModal(); refreshPublicSoon(); render(); toast('Precio especial guardado.'); }
+}
+
 function aTarifas() {
   const d = S.ad.d;
   const cabs = d.cabanas;
@@ -2428,6 +2484,7 @@ function aTarifas() {
         </select>
         <button class="btn btn-soft sm" data-a="aTab" data-t="ajustes">${ic('calendar', 16)} Feriados y días de tarifa alta</button>
       </div></div>
+    ${bloquesPanel()}
     ${lista.map(tarifasCard).join('')}`;
 }
 
@@ -3348,6 +3405,16 @@ const A = {
   },
   editCab(el) { editCab(el.dataset.id); },
   saveCab,
+  editBloque(el) { editBloque(el.dataset.id); },
+  saveBloque,
+  pickBloque(el) {
+    const x = (S.data.bloques || []).find(x => x.ID === el.dataset.id && x.CabanaID === S.cabId);
+    if (!x || x.FechaInicio < S.data.hoy) return toast('Este bloque ya no está disponible.');
+    if (!S.data.tipos.some(t => t.Modo === 'RANGO')) return toast('La reserva por rango no está habilitada. Consultanos para reservar este bloque.');
+    if (!isFree(S.cabId, x.FechaInicio, x.FechaFin)) return toast('Ese bloque ya está ocupado.');
+    S.bk.tipo = 'RANGO'; S.bk.ci = x.FechaInicio; S.bk.co = x.FechaFin;
+    S.bk.month = D.parse(x.FechaInicio); rerender();
+  },
   editTarifa(el) { editTarifa(el.dataset.id, el.dataset.cab); },
   saveTarifa,
   delTarifa(el) {
