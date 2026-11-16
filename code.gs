@@ -87,6 +87,7 @@ const APP = {
 };
 
 const SCHEMA = {
+  BloquesTarifarios: ['ID', 'CabanaID', 'Nombre', 'FechaInicio', 'FechaFin', 'Modalidad', 'Precio', 'Activa'],
   Cabanas: ['ID', 'Nombre', 'Descripcion', 'Capacidad', 'Habitaciones', 'Banos', 'PrecioNoche', 'PrecioFinSemana',
     'Amenidades', 'ImagenURL', 'Ubicacion', 'Rating', 'NumResenas', 'Activa', 'Creado'],
   Tarifas: ['ID', 'CabanaID', 'Nombre', 'MinPersonas', 'MaxPersonas', 'TipoPrecio', 'PrecioSemana', 'PrecioFinSemana',
@@ -104,13 +105,13 @@ const SCHEMA = {
     'Referencia', 'RegistradoPor', 'Creado', 'Estado', 'AnuladoPor', 'AnuladoEn', 'EditadoPor', 'EditadoEn', 'Revision', 'HistorialCambios']
 };
 
-const HOJAS = ['Reservas', 'Cabanas', 'Tarifas', 'TiposReserva', 'Promociones', 'Resenas', 'Usuarios', 'Configuracion', 'MovimientosFinancieros'];
+const HOJAS = ['BloquesTarifarios', 'Reservas', 'Cabanas', 'Tarifas', 'TiposReserva', 'Promociones', 'Resenas', 'Usuarios', 'Configuracion', 'MovimientosFinancieros'];
 
 const DATE_FIELDS = ['CheckIn', 'CheckOut', 'FechaInicio', 'FechaFin', 'Fecha'];
 const BOOL_FIELDS = ['Activa', 'Activo', 'Visible', 'Paquete'];
 const TEXT_FIELDS = ['ID', 'Codigo', 'GrupoID', 'CabanaID', 'TipoModo', 'Modo', 'Telefono', 'HoraLlegada', 'PromoCodigo',
   'EventID', 'Usuario', 'Valor', 'Clave', 'TarifaID', 'TipoPrecio', 'TipoPaquete'];
-const MONEY_FIELDS = ['PrecioNoche', 'PrecioFinSemana', 'PrecioSemana', 'PrecioPaquete', 'Subtotal', 'Descuento',
+const MONEY_FIELDS = ['Precio', 'PrecioNoche', 'PrecioFinSemana', 'PrecioSemana', 'PrecioPaquete', 'Subtotal', 'Descuento',
   'Total', 'Sena', 'Monto'];
 const COL_WIDTHS = { Descripcion: 320, Comentario: 320, Amenidades: 280, ImagenURL: 220, Notas: 260, Valor: 320, EventID: 160 };
 
@@ -482,6 +483,7 @@ function getPublicData() {
   const c = ctx.config;
   const hoy = today_();
   return {
+    bloques: (ctx.bloques || []).filter(x => isTrue_(x.Activa)).map(bloqueOut_),
     hoy: hoy,
     config: {
       nombre: c.NEGOCIO_NOMBRE || APP.NOMBRE,
@@ -1003,6 +1005,57 @@ function adminVoidFinancialMovement(token, id) {
  *  API ADMIN
  * ================================================================ */
 
+/** Indicadores del dashboard: año en curso y seis meses; sin duplicar días. */
+function resumenDashboard_(ctx, movimientos, hoy) {
+  const actual = hoy.slice(0, 7), anio = actual.slice(0, 4);
+  const recientes = Array.from({ length: 6 }, (_, i) => addMonths_(actual + '-01', i - 5).slice(0, 7));
+  const anuales = Array.from({ length: Number(actual.slice(5)) }, (_, i) => anio + '-' + String(i + 1).padStart(2, '0'));
+  const indice = Object.create(null);
+  const activas = ctx.cabanas.filter(c => isTrue_(c.Activa));
+  [...new Set(recientes.concat(anuales))].forEach(mes => {
+    const diasMes = daysInMonth_(mes);
+    const diasBase = mes === actual ? Number(hoy.slice(8, 10)) : diasMes;
+    indice[mes] = { mes, ingresos: 0, egresos: 0, saldo: 0, diasMes, diasBase,
+      ocupados: 0, disponibles: diasBase * activas.length, ocupacion: null,
+      cabanas: activas.map(c => ({ ID: String(c.ID), nombre: String(c.Nombre || c.ID), dias: new Set() })) };
+  });
+  ctx.reservas.forEach(r => {
+    if (String(r.Estado).trim() === 'Cancelada' || !isISO_(r.CheckIn)) return;
+    const m = indice[r.CheckIn.slice(0, 7)], ingreso = Number(r.Total);
+    if (m && Number.isFinite(ingreso) && ingreso > 0) m.ingresos += ingreso;
+    Object.values(indice).forEach(x => {
+      const c = x.cabanas.find(c => c.ID === String(r.CabanaID));
+      if (!c) return;
+      const inicio = x.mes + '-01', fin = addDays_(inicio, x.diasBase);
+      const salida = String(r.TipoModo).toUpperCase() === 'DIA' ? addDays_(r.CheckIn, 1)
+        : (isISO_(r.CheckOut) && r.CheckOut > r.CheckIn ? r.CheckOut : addDays_(r.CheckIn, 1));
+      for (let dia = r.CheckIn > inicio ? r.CheckIn : inicio; dia < salida && dia < fin; dia = addDays_(dia, 1)) c.dias.add(dia);
+    });
+  });
+  movimientos.forEach(r => {
+    const m = indice[String(r.Fecha || '').slice(0, 7)], monto = Number(r.Monto);
+    if (m && String(r.Tipo) === 'Egreso' && String(r.Estado || 'Activo') === 'Activo' && Number.isFinite(monto) && monto > 0) m.egresos += monto;
+  });
+  Object.values(indice).forEach(m => {
+    m.saldo = m.ingresos - m.egresos;
+    m.cabanas = m.cabanas.map(c => ({ ID: c.ID, nombre: c.nombre, ocupados: c.dias.size,
+      disponibles: m.diasBase, ocupacion: Math.round(1000 * c.dias.size / m.diasBase) / 10 }));
+    m.ocupados = m.cabanas.reduce((a, c) => a + c.ocupados, 0);
+    m.ocupacion = m.disponibles ? Math.round(1000 * m.ocupados / m.disponibles) / 10 : null;
+  });
+  const serie = anuales.map(m => indice[m]);
+  const ingresoTotal = serie.reduce((a, m) => a + m.ingresos, 0);
+  const disponibles = serie.reduce((a, m) => a + m.disponibles, 0);
+  const ocupados = serie.reduce((a, m) => a + m.ocupados, 0);
+  const minimo = Math.min(...serie.map(m => m.ingresos)), maximo = Math.max(...serie.map(m => m.ingresos));
+  return { actual: indice[actual], meses: recientes.map(m => indice[m]), anual: {
+    anio, cantidadMeses: serie.length, ingresoPromedio: ingresoTotal / serie.length,
+    ocupacionPromedio: disponibles ? Math.round(1000 * ocupados / disponibles) / 10 : null,
+    minimo, maximo, mesesMinimo: serie.filter(m => m.ingresos === minimo).map(m => m.mes),
+    mesesMaximo: serie.filter(m => m.ingresos === maximo).map(m => m.mes)
+  } };
+}
+
 function adminGetDashboard(token) {
   const user = requireAdmin_(token);
   ensureUpgrades_();
@@ -1057,6 +1110,8 @@ function adminGetDashboard(token) {
       proximos: proximosRecordatorios_(ctx, hoy, 14)
     } : { programado: false, proximos: [] },
     waTokenOk: puede('MENSAJES') && !!PropertiesService.getScriptProperties().getProperty(APP.PROP_WA_TOKEN),
+    resumenFinanciero: puede('REPORTES') ? resumenDashboard_(ctx, readTable_('MovimientosFinancieros').rows, hoy) : null,
+    bloques: puede('PRECIOS') ? (ctx.bloques || []).map(bloqueOut_) : [],
     stats: stats,
     calendarId: puede('CALENDARIO') ? calId : '',
     calendarName: puede('CALENDARIO') ? cal.getName() : '',
@@ -1959,10 +2014,60 @@ function loadCtx_() {
     config: getConfig_(),
     cabanas: readTable_('Cabanas').rows,
     tarifas: readTableSafe_('Tarifas').rows,
+    bloques: readTableSafe_('BloquesTarifarios').rows,
     tipos: readTable_('TiposReserva').rows,
     promos: readTable_('Promociones').rows,
     reservas: readTable_('Reservas').rows
   };
+}
+
+function precioEspecial(bloques, cabanaId, inicio, salida, modo) {
+  const fin = modo === 'DIA' ? inicio : salida;
+  const cruces = (bloques || []).filter(x => x.Activa && String(x.CabanaID) === String(cabanaId) &&
+    (modo === 'DIA' ? inicio >= x.FechaInicio && inicio < x.FechaFin : inicio < x.FechaFin && fin > x.FechaInicio));
+  const bloque = cruces.find(x => x.Modalidad === 'BLOQUE');
+  if (bloque && (modo === 'DIA' || inicio !== bloque.FechaInicio || salida !== bloque.FechaFin))
+    throw new Error('"' + bloque.Nombre + '" se reserva como bloque completo: llegada ' + bloque.FechaInicio + ', salida ' + bloque.FechaFin + '. Elegí exactamente esas fechas.');
+  if (modo === 'DIA' && cruces.length) throw new Error('Estas fechas tienen tarifa especial de estadía nocturna; no admiten reservas de día.');
+  return { bloque: bloque || null, noches: cruces.filter(x => x.Modalidad === 'NOCHE') };
+}
+
+function bloqueOut_(x) {
+  return { ID: String(x.ID), CabanaID: String(x.CabanaID), Nombre: String(x.Nombre || ''),
+    FechaInicio: String(x.FechaInicio), FechaFin: String(x.FechaFin), Modalidad: String(x.Modalidad),
+    Precio: Number(x.Precio), Activa: isTrue_(x.Activa) };
+}
+
+function adminSaveBloque(token, x) {
+  requireAdmin_(token, 'PRECIOS');
+  const lock = LockService.getScriptLock();
+  if (!lock.tryLock(20000)) throw new Error('Hay una operación en curso. Probá otra vez.');
+  try {
+    ensureUpgrades_();
+    x = x || {};
+    const ctx = loadCtx_(), tabla = readTable_('BloquesTarifarios');
+    const anterior = x.ID ? tabla.rows.find(r => String(r.ID) === String(x.ID)) : null;
+    if (x.ID && !anterior) throw new Error('No encontramos el bloque.');
+    if (!ctx.cabanas.some(c => String(c.ID) === String(x.CabanaID))) throw new Error('Elegí una cabaña.');
+    const valida = s => isISO_(s) && !isNaN(new Date(s + 'T12:00:00Z').getTime()) &&
+      new Date(s + 'T12:00:00Z').toISOString().slice(0, 10) === s && s >= '2000-01-01' && s <= '2100-12-31';
+    if (!valida(x.FechaInicio) || !valida(x.FechaFin) || x.FechaFin <= x.FechaInicio)
+      throw new Error('Ingresá llegada y salida válidas; la salida debe ser posterior.');
+    if (!['BLOQUE', 'NOCHE'].includes(x.Modalidad)) throw new Error('Elegí la modalidad.');
+    const precio = Number(x.Precio);
+    if (!Number.isSafeInteger(precio) || precio <= 0 || precio > 1000000000000) throw new Error('El precio debe ser un entero mayor a cero.');
+    const nombre = celdaTextoSeguro_(x.Nombre, 80);
+    if (!nombre.trim()) throw new Error('Ingresá un nombre.');
+    const obj = { ID: anterior ? anterior.ID : 'BL-' + shortId_(), CabanaID: String(x.CabanaID),
+      Nombre: nombre, FechaInicio: x.FechaInicio, FechaFin: x.FechaFin, Modalidad: x.Modalidad,
+      Precio: precio, Activa: !(x.Activa === false || x.Activa === 'false') };
+    if (obj.Activa && tabla.rows.some(r => String(r.ID) !== String(obj.ID) && isTrue_(r.Activa) &&
+      String(r.CabanaID) === obj.CabanaID && r.FechaInicio < obj.FechaFin && r.FechaFin > obj.FechaInicio))
+      throw new Error('Ya existe una tarifa especial activa que se superpone para esta cabaña.');
+    if (anterior) updateObj_('BloquesTarifarios', anterior._row, obj);
+    else appendObj_('BloquesTarifarios', obj);
+  } finally { lock.releaseLock(); }
+  return adminGetDashboard(token);
 }
 
 function buildQuote_(p, ctx, isAdmin) {
@@ -1981,10 +2086,7 @@ function buildQuote_(p, ctx, isAdmin) {
   const huespedesTarifa = huespedesParaTarifa_(modo, huespedes);
   const tarifasCab = tarifasDe_(ctx.tarifas, cab.ID);
   const tarifa = tarifaPara_(tarifasCab, huespedesTarifa);
-  if (tarifasCab.length && !tarifa) {
-    throw new Error('Para ' + huespedesTarifa + (huespedesTarifa === 1 ? ' huésped' : ' huéspedes') +
-      ' no hay una tarifa cargada en ' + cab.Nombre + '. Escribinos y la armamos a medida.');
-  }
+
 
   if (!isISO_(p.checkIn)) throw new Error('Elegí la fecha de llegada.');
   if (p.checkIn < today_() && !isAdmin) throw new Error('La fecha de llegada ya pasó.');
@@ -2009,11 +2111,12 @@ function buildQuote_(p, ctx, isAdmin) {
     throw new Error('Elegí la fecha de salida.');
   }
 
+  const especialInicial = precioEspecial((ctx.bloques || []).map(bloqueOut_), cab.ID, p.checkIn, checkOut, modo);
   const noches = modo === 'DIA' ? 0 : diffDays_(p.checkIn, checkOut);
   if (modo !== 'DIA') {
     if (noches < 1) throw new Error('La salida debe ser posterior a la llegada.');
-    if (minN && noches < minN) throw new Error(tipo.Nombre + ' requiere al menos ' + minN + ' noches.');
-    if (maxN && noches > maxN) throw new Error(tipo.Nombre + ' permite hasta ' + maxN + ' noches.');
+    if (!especialInicial.bloque && minN && noches < minN) throw new Error(tipo.Nombre + ' requiere al menos ' + minN + ' noches.');
+    if (!especialInicial.bloque && maxN && noches > maxN) throw new Error(tipo.Nombre + ' permite hasta ' + maxN + ' noches.');
   }
   const hora = /^\d{2}:\d{2}$/.test(p.hora || '') ? p.hora : '';
   if (modo === 'DIA' && !hora) throw new Error('Elegí el horario de llegada.');
@@ -2046,8 +2149,16 @@ function buildQuote_(p, ctx, isAdmin) {
     ? precioNocheDe_(tarifa, cab, huespedesTarifa, false, true) : 0;
 
   ocurrencias.forEach(o => {
+    const especial = precioEspecial((ctx.bloques || []).map(bloqueOut_), cab.ID, o.checkIn, o.checkOut, modo);
+    o.especialFijo = 0;
+    if (especial.bloque) {
+      o.subtotal = Number(especial.bloque.Precio); o.especialFijo = o.subtotal;
+      o.paquete = false; o.bloqueNombre = especial.bloque.Nombre;
+      return;
+    }
     let sub = 0;
     if (modo === 'DIA') {
+      if (tarifasCab.length && !tarifa) throw new Error('No hay tarifa para esta cantidad de huéspedes.');
       const base = precioNocheDe_(tarifa, cab, huespedesTarifa, esFinde_(o.checkIn, wk), false);
       // El porcentaje se aplica sobre la tarifa diaria del tramo de huéspedes
       // correspondiente y respeta si esa fecha se cobra como entre semana o finde.
@@ -2057,8 +2168,11 @@ function buildQuote_(p, ctx, isAdmin) {
     } else {
       const fechas = [];
       for (let i = 0; i < noches; i++) fechas.push(addDays_(o.checkIn, i));
-      o.paquete = aplicaPaquete_(tarifa, fechas, wk);
+      o.paquete = !especial.noches.length && aplicaPaquete_(tarifa, fechas, wk);
       fechas.forEach(f => {
+        const especialNoche = especial.noches.find(x => f >= x.FechaInicio && f < x.FechaFin);
+        if (especialNoche) { sub += Number(especialNoche.Precio); o.especialFijo += Number(especialNoche.Precio); return; }
+        if (tarifasCab.length && !tarifa) throw new Error('No hay tarifa para esta cantidad de huéspedes.');
         const finde = esFinde_(f, wk);
         sub += precioNocheDe_(tarifa, cab, huespedesTarifa, finde, o.paquete);
         if (o.paquete) det.nochesPaquete++;
@@ -2086,7 +2200,7 @@ function buildQuote_(p, ctx, isAdmin) {
   const pct = Math.min(tipoPct + promoPct, num_(ctx.config.MAX_DESCUENTO, 50));
   const senaPct = num_(ctx.config.SENA_PCT, 0);
   ocurrencias.forEach(o => {
-    o.descuento = Math.round(o.subtotal * pct / 100);
+    o.descuento = Math.round((o.subtotal - (o.especialFijo || 0)) * pct / 100);
     o.total = o.subtotal - o.descuento;
     o.sena = Math.round(o.total * senaPct / 100);
   });
@@ -2096,7 +2210,7 @@ function buildQuote_(p, ctx, isAdmin) {
   return {
     cabanaId: cab.ID, cabanaNombre: cab.Nombre, ubicacion: cab.Ubicacion || '',
     tipo: modo, tipoNombre: tipo.Nombre, modo: modo,
-    tarifaId: tarifa ? String(tarifa.ID) : '', tarifaNombre: tarifa ? String(tarifa.Nombre || '') : '',
+    tarifaId: tarifa ? String(tarifa.ID) : '', tarifaNombre: ocurrencias.some(o => o.especialFijo) ? 'Tarifa especial · ' + ocurrencias.map(o => o.bloqueNombre || 'por noche').join(' / ') : (tarifa ? String(tarifa.Nombre || '') : ''),
     tarifa: tarifa ? tarifaOut_(tarifa) : null, paquete: paquete, detalle: det,
     huespedes: huespedes, checkIn: p.checkIn, checkOut: checkOut, hora: hora,
     noches: noches, frecuencia: frecuencia, ocurrencias: ocurrencias,
@@ -2141,7 +2255,9 @@ function buildManualQuote_(p, ctx) {
     if (!Number.isSafeInteger(n) || n < 0 || n > 1000000000000) throw new Error(label + ': ingresá un importe entero igual o mayor a cero.');
     return n;
   };
+  const especial = precioEspecial((ctx.bloques || []).map(bloqueOut_), cab.ID, p.checkIn, p.checkOut, 'RANGO');
   const total = amount(p.totalManual, 'el precio total');
+  if (especial.bloque && total !== Number(especial.bloque.Precio)) throw new Error('El bloque ' + especial.bloque.Nombre + ' tiene precio total fijo: ' + especial.bloque.Precio + '.');
   const sena = amount(p.senaManual, 'la seña');
   if (sena > total) throw new Error('La seña no puede superar el precio total.');
   if (p.promo) throw new Error('El precio manual es final; no se le aplican promociones.');
@@ -2626,6 +2742,7 @@ function sendWhatsappTemplate_(to, vars, cfg) {
 /** Migraciones seguras para hojas creadas con versiones anteriores. */
 function ensureUpgrades_() {
   headersReset_();
+  ensureSheetExists_('BloquesTarifarios');
   ensureSheetExists_('Tarifas');
   ensureSheetExists_('MovimientosFinancieros');
   HOJAS.forEach(ensureColumns_);
